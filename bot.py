@@ -171,19 +171,21 @@ async def expire_ad(ad_id: int):
 # WEBSOCKET (DONATEPAY)
 # ============================================================
 async def start_donatepay_listener():
+    print("DEBUG: starting listener")
     try:
         async with aiohttp.ClientSession() as session:
             headers = {"Authorization": f"Bearer {DONATEPAY_TOKEN}"}
-            async with session.post("https://donatepay.ru/api/v2/socket/token", headers=headers) as resp:
-                if resp.status != 200:
-                    print(f"Не удалось получить socket token: {resp.status}")
-                    return
-                token_data = await resp.json()
-                socket_token = token_data.get("token")
-
-        client = Client("wss://centrifugo.donatepay.ru:443/connection/websocket")
-        await client.connect()
-        print("WebSocket подключен.")
+            token_preview = DONATEPAY_TOKEN[:10] if DONATEPAY_TOKEN else "NONE"
+            print(f"DEBUG: token = {token_preview}...")
+            async with session.post(
+                "https://donatepay.ru/api/v2/socket/token",
+                headers=headers
+            ) as resp:
+                print(f"DEBUG: socket token status = {resp.status}")
+                text = await resp.text()
+                print(f"DEBUG: socket token response = {text[:500]}")
+    except Exception as e:
+        print(f"DEBUG: listener error = {e}")
 
         async def on_publication(ctx):
             try:
