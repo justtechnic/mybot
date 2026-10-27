@@ -190,8 +190,8 @@ async def check_donatepay_payment(amount_rub: float, comment_keyword: str) -> bo
                     print(f"DonatePay API status: {resp.status}")
                     return False
                 data = await resp.json()
-		print("=== RAW RESPONSE ===")
-		print(data)
+        print("=== RAW RESPONSE ===")
+        print(data)
                 # Отладка: раскомментируйте при проблемах
 
                 transactions = data.get("data", []) if isinstance(data, dict) else []
