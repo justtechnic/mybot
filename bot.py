@@ -149,7 +149,7 @@ async def check_donatepay_payment(amount_rub: float, comment_keyword: str) -> bo
     url = "https://donatepay.ru/api/v1/transactions"
     headers = {"Authorization": f"Bearer {DONATEPAY_TOKEN}"}
     params = {"type": "donation", "limit": 30, "order": "DESC"}
-    min_sum = amount_rub - 1.0
+    min_sum = 20
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers, params=params) as resp:
             print(f"DEBUG: response status = {resp.status}")
