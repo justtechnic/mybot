@@ -6,7 +6,7 @@ staypresent.web.json({"status": "running"})
 
 # 2. Самопинг, чтобы Render не усыплял сервис
 # ВАЖНО: Замените на ваш будущий URL Render
-MY_RENDER_URL = "https://ВАШ-БУДУЩИЙ-АДРЕС.onrender.com" 
+MY_RENDER_URL = "https://mybot-z0zj.onrender.com" 
 staypresent.cron(MY_RENDER_URL, interval=240)
 
 # 3. Запуск вашего bot.py
