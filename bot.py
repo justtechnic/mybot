@@ -170,6 +170,7 @@ async def expire_ad(ad_id: int):
 # DONATEPAY (обновлённая проверка)
 # ============================================================
 async def check_donatepay_payment(amount_rub: float, comment_keyword: str) -> bool:
+    print(f"DEBUG: DONATEPAY_TOKEN = {DONATEPAY_TOKEN!r}")
     """
     Проверяет транзакции DonatePay.
     - Допуск по сумме: считаем оплатой, если sum >= amount_rub - 1 (комиссия).
