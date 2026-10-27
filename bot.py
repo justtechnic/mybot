@@ -174,7 +174,7 @@ async def start_donatepay_listener():
     try:
         async with aiohttp.ClientSession() as session:
             headers = {"Authorization": f"Bearer {DONATEPAY_TOKEN}"}
-            async with session.get("https://donatepay.ru/api/v2/socket/token", headers=headers) as resp:
+            async with session.post("https://donatepay.ru/api/v2/socket/token", headers=headers) as resp:
                 if resp.status != 200:
                     print(f"Не удалось получить socket token: {resp.status}")
                     return
