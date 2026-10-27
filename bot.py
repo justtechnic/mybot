@@ -181,44 +181,35 @@ async def check_donatepay_payment(amount_rub: float, comment_keyword: str) -> bo
     url = "https://donatepay.ru/api/v1/transactions"
     headers = {"Authorization": f"Bearer {DONATEPAY_TOKEN}"}
     params = {"type": "donation", "limit": 30, "order": "DESC"}
-
     min_sum = amount_rub - 1.0  # допуск на комиссию
 
     async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url, headers=headers, params=params) as resp:
+        async with session.get(url, headers=headers, params=params) as resp:
                 if resp.status != 200:
                     print(f"DonatePay API status: {resp.status}")
                     return False
                 data = await resp.json()
                 print("=== RAW RESPONSE ===")
                 print(data)
-                # Отладка: раскомментируйте при проблемах
-
                 transactions = data.get("data", []) if isinstance(data, dict) else []
-
                 for tx in transactions:
                     status = (tx.get("status") or "").lower()
                     if status and status != "success":
                         continue
-
                     try:
                         tx_sum = float(tx.get("sum", 0))
                     except (TypeError, ValueError):
                         continue
                     if tx_sum < min_sum:
                         continue
-
                     comment = (tx.get("comment") or "").strip()
                     vars_obj = tx.get("vars") or {}
                     vars_comment = ""
                     if isinstance(vars_obj, dict):
                         vars_comment = (vars_obj.get("comment") or "").strip()
-
                     if comment_keyword in comment or comment_keyword in vars_comment:
                         print(f"✅ Найдена оплата: sum={tx_sum}, comment='{comment or vars_comment}'")
                         return True
-
                 # Отладка: что видели, но не совпало
                 # for tx in transactions:
                 #     print(f"skip: status={tx.get('status')}, sum={tx.get('sum')}, "
