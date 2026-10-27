@@ -9,13 +9,20 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from centrifuge import Client
 
+# ============================================================
+# НАСТРОЙКИ
+# ============================================================
 TOKEN = os.getenv("BOT_TOKEN")
 DONATEPAY_TOKEN = os.getenv("DONATEPAY_TOKEN")
+DONATEPAY_USER_ID = os.getenv("DONATEPAY_USER_ID", "1409884")
+
 PAYMENT_URL = "https://new.donatepay.ru/@1409884"
 CHANNELS = ["@JustTechnic", "@baraholkamskkupiproday"]
 DB_PATH = "ads.db"
 ADMIN_IDS = [7614009397]
+
 PRICE_RUB = 25.0
 PAID_DAYS = 7
 TRIAL_HOURS = 24
@@ -25,8 +32,10 @@ dp = Dispatcher()
 
 class AdState(StatesGroup):
     waiting_for_text = State()
-    waiting_for_payment = State()
 
+# ============================================================
+# БАЗА ДАННЫХ
+# ============================================================
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
@@ -71,16 +80,31 @@ async def mark_trial_used(user_id: int):
         )
         await db.commit()
 
-async def save_ad(user_id: int, ad_text: str, channel: str, message_id: int,
-                  expires_at: str | None = None, is_trial: bool = False):
+async def save_pending_ad(user_id: int, ad_text: str, expires_at: str, is_trial: bool):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "INSERT INTO ads (user_id, ad_text, channel, message_id, status, created_at, expires_at, is_trial) "
-            "VALUES (?, ?, ?, ?, 'АКТУАЛЬНО', ?, ?, ?)",
-            (user_id, ad_text, channel, message_id, datetime.now().isoformat(),
-             expires_at, 1 if is_trial else 0)
+            "VALUES (?, ?, 'PENDING', 0, 'ОЖИДАНИЕ', ?, ?, ?)",
+            (user_id, ad_text, datetime.now().isoformat(), expires_at, 1 if is_trial else 0)
         )
         await db.commit()
+
+async def activate_pending_ad(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM ads WHERE user_id = ? AND status = 'ОЖИДАНИЕ' ORDER BY id DESC LIMIT 1",
+            (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        await db.execute(
+            "UPDATE ads SET status = 'АКТУАЛЬНО' WHERE id = ?",
+            (row["id"],)
+        )
+        await db.commit()
+        return dict(row)
 
 async def get_user_ads(user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -143,43 +167,85 @@ async def expire_ad(ad_id: int):
         await db.execute("UPDATE ads SET status = 'ПРОДАНО' WHERE id = ?", (ad_id,))
         await db.commit()
 
-async def check_donatepay_payment(amount_rub: float, comment_keyword: str) -> bool:
-    print(f"DEBUG: DONATEPAY_TOKEN = {DONATEPAY_TOKEN!r}")
-    print("DEBUG: Starting DonatePay check")
-    url = "https://donatepay.ru/api/v1/transactions"
-    headers = {"Authorization": f"Bearer {DONATEPAY_TOKEN}"}
-    params = {"type": "donation", "limit": 30, "order": "DESC"}
-    min_sum = 20
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers, params=params) as resp:
-            print(f"DEBUG: response status = {resp.status}")
-            if resp.status != 200:
-                print(f"DonatePay API status: {resp.status}")
-                return False
-            data = await resp.json()
-            print("=== RAW RESPONSE ===")
-            print(data)
-            transactions = data.get("data", []) if isinstance(data, dict) else []
-            for tx in transactions:
-                status = (tx.get("status") or "").lower()
-                if status and status != "success":
-                    continue
-                try:
-                    tx_sum = float(tx.get("sum", 0))
-                except (TypeError, ValueError):
-                    continue
-                if tx_sum < min_sum:
-                    continue
-                comment = (tx.get("comment") or "").strip()
-                vars_obj = tx.get("vars") or {}
-                vars_comment = ""
-                if isinstance(vars_obj, dict):
-                    vars_comment = (vars_obj.get("comment") or "").strip()
-                if comment_keyword in comment or comment_keyword in vars_comment:
-                    print(f"Найдена оплата: sum={tx_sum}, comment='{comment or vars_comment}'")
-                    return True
-            return False
+# ============================================================
+# WEBSOCKET (DONATEPAY)
+# ============================================================
+async def start_donatepay_listener():
+    try:
+        async with aiohttp.ClientSession() as session:
+            headers = {"Authorization": f"Bearer {DONATEPAY_TOKEN}"}
+            async with session.get("https://donatepay.ru/api/v2/socket/token", headers=headers) as resp:
+                if resp.status != 200:
+                    print(f"Не удалось получить socket token: {resp.status}")
+                    return
+                token_data = await resp.json()
+                socket_token = token_data.get("token")
 
+        client = Client("wss://centrifugo.donatepay.ru:443/connection/websocket")
+        await client.connect()
+        print("WebSocket подключен.")
+
+        async def on_publication(ctx):
+            try:
+                payload = ctx.pub.data
+                notification = payload.get("result", {}).get("data", {}).get("data", {}).get("notification", {})
+                if not notification:
+                    return
+
+                vars_data = notification.get("vars", {})
+                amount = float(vars_data.get("sum", 0))
+                comment = (vars_data.get("comment") or "").strip()
+                donor_name = vars_data.get("name", "Unknown")
+
+                print(f"DEBUG WS: Донат от {donor_name} на {amount}, комментарий: '{comment}'")
+
+                if amount >= 20.0:
+                    for word in comment.split():
+                        if word.isdigit():
+                            telegram_id = int(word)
+                            activated_ad = await activate_pending_ad(telegram_id)
+                            if activated_ad:
+                                print(f"WS: Активировано объявление #{activated_ad['id']} для {telegram_id}")
+                                for channel in CHANNELS:
+                                    try:
+                                        sent = await bot.send_message(
+                                            channel,
+                                            f"**АКТУАЛЬНО**\n\n{activated_ad['ad_text']}",
+                                            parse_mode="Markdown"
+                                        )
+                                        async with aiosqlite.connect(DB_PATH) as db:
+                                            await db.execute(
+                                                "UPDATE ads SET channel = ?, message_id = ? WHERE id = ?",
+                                                (channel, sent.message_id, activated_ad["id"])
+                                            )
+                                            await db.commit()
+                                    except Exception as e:
+                                        print(f"Ошибка публикации в {channel}: {e}")
+                                try:
+                                    await bot.send_message(
+                                        telegram_id,
+                                        f"✅ Оплата получена! Ваше объявление активировано на {PAID_DAYS} дней."
+                                    )
+                                except Exception:
+                                    pass
+                            break
+            except Exception as e:
+                print(f"Ошибка обработки WS: {e}")
+
+        sub = client.new_subscription(f"$public:{DONATEPAY_USER_ID}")
+        sub.on_publication(on_publication)
+        await sub.subscribe()
+        print(f"Подписка на канал $public:{DONATEPAY_USER_ID} оформлена.")
+
+        while True:
+            await asyncio.sleep(10)
+
+    except Exception as e:
+        print(f"Ошибка WebSocket: {e}")
+
+# ============================================================
+# КЛАВИАТУРЫ
+# ============================================================
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
@@ -197,7 +263,6 @@ def main_menu(user_id: int = 0):
 def pay_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Оплатить 25 руб", url=PAYMENT_URL)],
-        [InlineKeyboardButton(text="Я оплатил", callback_data="check_payment")],
         [InlineKeyboardButton(text="Назад", callback_data="main")],
     ])
 
@@ -207,31 +272,9 @@ def admin_menu():
         [InlineKeyboardButton(text="В главное меню", callback_data="main")],
     ])
 
-async def publish_ad(target_msg, user_id: int, ad_text: str,
-                     expires_at: str | None, is_trial: bool):
-    post_text = f"**АКТУАЛЬНО**\n\n{ad_text}"
-    success = []
-    for channel in CHANNELS:
-        try:
-            sent = await bot.send_message(channel, post_text, parse_mode="Markdown")
-            await save_ad(user_id, ad_text, channel, sent.message_id,
-                          expires_at=expires_at, is_trial=is_trial)
-            success.append(channel)
-        except Exception as e:
-            print(f"Ошибка публикации в {channel}: {e}")
-    if success:
-        if is_trial:
-            await target_msg.answer(
-                f"Пробное объявление опубликовано на {TRIAL_HOURS} ч. в: {', '.join(success)}\n\n"
-                "Через сутки оно автоматически станет ПРОДАНО."
-            )
-        else:
-            await target_msg.answer(
-                f"Объявление опубликовано на {PAID_DAYS} дней в: {', '.join(success)}"
-            )
-    else:
-        await target_msg.answer("Не удалось опубликовать. Проверьте, что бот админ в каналах.")
-
+# ============================================================
+# ХЕНДЛЕРЫ
+# ============================================================
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer("Добро пожаловать! Выберите действие:",
@@ -258,8 +301,8 @@ async def help_cb(callback: types.CallbackQuery):
         f"Первое объявление — бесплатно на {TRIAL_HOURS} ч. (пробный период).\n"
         f"Далее — {PRICE_RUB:.0f} руб. за {PAID_DAYS} дней публикации.\n"
         "После оплаты в комментарии к донату укажите ваш Telegram ID.\n"
-        "«Мои объявления» — список активных постов и кнопка «Продано».\n"
-        "По истечении срока объявление автоматически меняется на ПРОДАНО, и бот присылает кнопку продления.",
+        "Бот автоматически получит уведомление и активирует объявление.\n"
+        "«Мои объявления» — список активных постов и кнопка «Продано».",
         reply_markup=kb, parse_mode="Markdown"
     )
     await callback.answer()
@@ -292,54 +335,43 @@ async def receive_ad_text(message: types.Message, state: FSMContext):
     if not message.text or len(message.text) > 500:
         await message.answer("Текст слишком длинный. Максимум 500 символов.")
         return
+
     user_id = message.from_user.id
-    await state.update_data(ad_text=message.text)
     used = await has_used_trial(user_id)
+
     if not used:
-        await state.set_state(AdState.waiting_for_payment)
         await message.answer(f"Публикую пробное объявление на {TRIAL_HOURS} ч...")
         expires_at = (datetime.now() + timedelta(hours=TRIAL_HOURS)).isoformat()
-        await publish_ad(message, user_id, message.text, expires_at, is_trial=True)
+        await save_pending_ad(user_id, message.text, expires_at, is_trial=True)
+        activated_ad = await activate_pending_ad(user_id)
+        if activated_ad:
+            for channel in CHANNELS:
+                try:
+                    sent = await bot.send_message(channel, f"**АКТУАЛЬНО**\n\n{message.text}", parse_mode="Markdown")
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute(
+                            "UPDATE ads SET channel = ?, message_id = ? WHERE id = ?",
+                            (channel, sent.message_id, activated_ad["id"])
+                        )
+                        await db.commit()
+                except Exception as e:
+                    print(f"Ошибка публикации в {channel}: {e}")
         await mark_trial_used(user_id)
         await state.clear()
+        await message.answer(f"Пробное объявление опубликовано на {TRIAL_HOURS} ч.")
         return
-    await state.set_state(AdState.waiting_for_payment)
+
+    expires_at = (datetime.now() + timedelta(days=PAID_DAYS)).isoformat()
+    await save_pending_ad(user_id, message.text, expires_at, is_trial=False)
+    await state.clear()
     await message.answer(
-        f"Ваш текст сохранён:\n\n_{message.text}_\n\n"
+        f"Ваш текст сохранён и ожидает оплаты.\n\n"
         f"**Для публикации на {PAID_DAYS} дней оплатите {PRICE_RUB:.0f} руб.:**\n"
         f"1. Перейдите по кнопке «Оплатить».\n"
         f"2. В комментарии к донату укажите ваш Telegram ID: `{user_id}`\n"
-        f"3. Вернитесь в бот и нажмите «Я оплатил».",
+        f"3. Бот автоматически получит уведомление и опубликует объявление.",
         reply_markup=pay_keyboard(), parse_mode="Markdown"
     )
-
-@dp.callback_query(F.data == "check_payment")
-async def check_payment(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    ad_text = data.get("ad_text")
-    if not ad_text:
-        await callback.answer("Сначала создайте объявление.", show_alert=True)
-        return
-    user_id = callback.from_user.id
-    await callback.message.edit_text("Проверяю оплату...")
-    paid = await check_donatepay_payment(PRICE_RUB, comment_keyword=str(user_id))
-    if not paid:
-        await callback.message.edit_text(
-            "Оплата не найдена.\n\n"
-            f"Убедитесь, что перевели {PRICE_RUB:.0f} руб. и указали в комментарии ID: `{user_id}`.",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="Попробовать снова", callback_data="check_payment")],
-                [InlineKeyboardButton(text="Назад", callback_data="main")],
-            ])
-        )
-        await callback.answer()
-        return
-    await callback.message.edit_text(f"Оплата подтверждена! Публикую на {PAID_DAYS} дней...")
-    expires_at = (datetime.now() + timedelta(days=PAID_DAYS)).isoformat()
-    await publish_ad(callback.message, user_id, ad_text, expires_at, is_trial=False)
-    await state.clear()
-    await callback.answer()
 
 @dp.callback_query(F.data == "my_ads")
 async def my_ads(callback: types.CallbackQuery):
@@ -489,23 +521,14 @@ async def expire_loop():
                     )
                 except Exception as e:
                     print(f"Ошибка редактирования #{ad['id']}: {e}")
-                if ad["is_trial"]:
-                    text = (
-                        "**Пробный период окончен.**\n\n"
-                        "Ваше объявление переведено в статус ПРОДАНО.\n"
-                        f"Если хотите продлить публикацию на {PAID_DAYS} дней, оплатите ниже.\n\n"
-                        f"Для подтверждения укажите в комментарии к донату ваш ID: `{ad['user_id']}`"
-                    )
-                else:
-                    text = (
-                        f"**Срок публикации ({PAID_DAYS} дней) истёк.**\n\n"
-                        "Объявление переведено в статус ПРОДАНО.\n"
-                        f"Чтобы продлить ещё на {PAID_DAYS} дней, оплатите ниже.\n\n"
-                        f"Для подтверждения укажите в комментарии к донату ваш ID: `{ad['user_id']}`"
-                    )
+                text = (
+                    f"**Срок публикации ({PAID_DAYS} дней) истёк.**\n\n"
+                    "Объявление переведено в статус ПРОДАНО.\n"
+                    f"Чтобы продлить ещё на {PAID_DAYS} дней, оплатите ниже.\n\n"
+                    f"Для подтверждения укажите в комментарии к донату ваш ID: `{ad['user_id']}`"
+                )
                 renew_kb = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text=f"Оплатить {PRICE_RUB:.0f} руб", url=PAYMENT_URL)],
-                    [InlineKeyboardButton(text="Я оплатил", callback_data=f"renew_{ad['id']}")],
                 ])
                 try:
                     await bot.send_message(ad["user_id"], text,
@@ -516,51 +539,13 @@ async def expire_loop():
             print(f"Ошибка в expire_loop: {e}")
         await asyncio.sleep(60)
 
-@dp.callback_query(F.data.startswith("renew_"))
-async def renew_cb(callback: types.CallbackQuery, state: FSMContext):
-    ad_id = int(callback.data.split("_")[1])
-    user_id = callback.from_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM ads WHERE id = ? AND user_id = ?", (ad_id, user_id)) as cur:
-            row = await cur.fetchone()
-    if not row:
-        await callback.answer("Объявление не найдено.", show_alert=True)
-        return
-    await callback.message.edit_text("Проверяю оплату...")
-    paid = await check_donatepay_payment(PRICE_RUB, comment_keyword=str(user_id))
-    if not paid:
-        await callback.message.edit_text(
-            "Оплата не найдена. Проверьте комментарий к донату (ваш ID) и попробуйте снова.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="Попробовать снова", callback_data=f"renew_{ad_id}")],
-            ])
-        )
-        await callback.answer()
-        return
-    new_expires = (datetime.now() + timedelta(days=PAID_DAYS)).isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE ads SET status = 'АКТУАЛЬНО', expires_at = ? WHERE id = ?",
-            (new_expires, ad_id)
-        )
-        await db.commit()
-    try:
-        await bot.edit_message_text(
-            chat_id=row["channel"], message_id=row["message_id"],
-            text=f"**АКТУАЛЬНО**\n\n{row['ad_text']}", parse_mode="Markdown"
-        )
-    except Exception as e:
-        print(f"Ошибка редактирования при продлении: {e}")
-    await callback.message.edit_text(
-        f"Оплата подтверждена! Публикация продлена на {PAID_DAYS} дней.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="В меню", callback_data="main")]])
-    )
-    await callback.answer()
-
+# ============================================================
+# ЗАПУСК
+# ============================================================
 async def main():
     await init_db()
     asyncio.create_task(expire_loop())
+    asyncio.create_task(start_donatepay_listener())
     print("Бот запущен.")
     await dp.start_polling(bot)
 

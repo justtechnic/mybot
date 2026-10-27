@@ -1,5 +1,5 @@
 aiogram
 aiohttp
 aiosqlite
-python-dotenv
+centrifuge-python
 staypresent[prod]
