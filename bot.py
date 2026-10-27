@@ -9,7 +9,7 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from centrifuge import Client
+from centrifuge import Client, SubscriptionEventHandler
 
 # ============================================================
 # НАСТРОЙКИ
@@ -170,72 +170,70 @@ async def expire_ad(ad_id: int):
 # ============================================================
 # WEBSOCKET (DONATEPAY)
 # ============================================================
+class DonateHandler(SubscriptionEventHandler):
+    async def on_publication(self, ctx):
+        try:
+            payload = ctx.pub.data
+            notification = payload.get("result", {}).get("data", {}).get("data", {}).get("notification", {})
+            if not notification:
+                return
+
+            vars_data = notification.get("vars", {})
+            amount = float(vars_data.get("sum", 0))
+            comment = (vars_data.get("comment") or "").strip()
+            donor_name = vars_data.get("name", "Unknown")
+
+            print(f"DEBUG WS: Донат от {donor_name} на {amount}, комментарий: '{comment}'")
+
+            if amount >= 20.0:
+                for word in comment.split():
+                    if word.isdigit():
+                        telegram_id = int(word)
+                        activated_ad = await activate_pending_ad(telegram_id)
+                        if activated_ad:
+                            print(f"WS: Активировано объявление #{activated_ad['id']} для {telegram_id}")
+                            for channel in CHANNELS:
+                                try:
+                                    sent = await bot.send_message(
+                                        channel,
+                                        f"**АКТУАЛЬНО**\n\n{activated_ad['ad_text']}",
+                                        parse_mode="Markdown"
+                                    )
+                                    async with aiosqlite.connect(DB_PATH) as db:
+                                        await db.execute(
+                                            "UPDATE ads SET channel = ?, message_id = ? WHERE id = ?",
+                                            (channel, sent.message_id, activated_ad["id"])
+                                        )
+                                        await db.commit()
+                                except Exception as e:
+                                    print(f"Ошибка публикации в {channel}: {e}")
+                            try:
+                                await bot.send_message(
+                                    telegram_id,
+                                    f"✅ Оплата получена! Ваше объявление активировано на {PAID_DAYS} дней."
+                                )
+                            except Exception:
+                                pass
+                        break
+        except Exception as e:
+            print(f"Ошибка обработки WS: {e}")
+
 async def start_donatepay_listener():
-    print("DEBUG: starting listener")
     try:
         async with aiohttp.ClientSession() as session:
             headers = {"Authorization": f"Bearer {DONATEPAY_TOKEN}"}
-            token_preview = DONATEPAY_TOKEN[:10] if DONATEPAY_TOKEN else "NONE"
-            print(f"DEBUG: token = {token_preview}...")
-            async with session.post(
-                "https://donatepay.ru/api/v2/socket/token",
-                headers=headers
-            ) as resp:
-                print(f"DEBUG: socket token status = {resp.status}")
-                text = await resp.text()
-                print(f"DEBUG: socket token response = {text[:500]}")
-    except Exception as e:
-        print(f"DEBUG: listener error = {e}")
-
-        async def on_publication(ctx):
-            try:
-                payload = ctx.pub.data
-                notification = payload.get("result", {}).get("data", {}).get("data", {}).get("notification", {})
-                if not notification:
+            async with session.post("https://donatepay.ru/api/v2/socket/token", headers=headers) as resp:
+                if resp.status != 200:
+                    print(f"Не удалось получить socket token: {resp.status}")
                     return
+                token_data = await resp.json()
+                socket_token = token_data.get("token")
 
-                vars_data = notification.get("vars", {})
-                amount = float(vars_data.get("sum", 0))
-                comment = (vars_data.get("comment") or "").strip()
-                donor_name = vars_data.get("name", "Unknown")
+        client = Client("wss://centrifugo.donatepay.ru:443/connection/websocket", token=socket_token)
+        await client.connect()
+        print("WebSocket подключен.")
 
-                print(f"DEBUG WS: Донат от {donor_name} на {amount}, комментарий: '{comment}'")
-
-                if amount >= 20.0:
-                    for word in comment.split():
-                        if word.isdigit():
-                            telegram_id = int(word)
-                            activated_ad = await activate_pending_ad(telegram_id)
-                            if activated_ad:
-                                print(f"WS: Активировано объявление #{activated_ad['id']} для {telegram_id}")
-                                for channel in CHANNELS:
-                                    try:
-                                        sent = await bot.send_message(
-                                            channel,
-                                            f"**АКТУАЛЬНО**\n\n{activated_ad['ad_text']}",
-                                            parse_mode="Markdown"
-                                        )
-                                        async with aiosqlite.connect(DB_PATH) as db:
-                                            await db.execute(
-                                                "UPDATE ads SET channel = ?, message_id = ? WHERE id = ?",
-                                                (channel, sent.message_id, activated_ad["id"])
-                                            )
-                                            await db.commit()
-                                    except Exception as e:
-                                        print(f"Ошибка публикации в {channel}: {e}")
-                                try:
-                                    await bot.send_message(
-                                        telegram_id,
-                                        f"✅ Оплата получена! Ваше объявление активировано на {PAID_DAYS} дней."
-                                    )
-                                except Exception:
-                                    pass
-                            break
-            except Exception as e:
-                print(f"Ошибка обработки WS: {e}")
-
-        sub = client.new_subscription(f"$public:{DONATEPAY_USER_ID}")
-        sub.on_publication(on_publication)
+        sub = client.new_subscription(f"$public:{DONATEPAY_USER_ID}", DonateHandler())
         await sub.subscribe()
         print(f"Подписка на канал $public:{DONATEPAY_USER_ID} оформлена.")
 
