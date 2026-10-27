@@ -14,7 +14,7 @@ from aiogram.fsm.state import State, StatesGroup
 # НАСТРОЙКИ
 # ============================================================
 TOKEN = os.getenv("BOT_TOKEN", "8789314111:AAGIkykfs3uLNzs5z1ceuakwpm-U4lZR34o")
-DONATEPAY_TOKEN = os.getenv("DONATEPAY_TOKEN", "oveJgGbYUdoOOURQn24N7Tk28GxacupdZd3C5KXBc1HdcGOf4Cv9IrlyDgvk")
+DONATEPAY_TOKEN = os.getenv("DONATEPAY_TOKEN")
 
 PAYMENT_URL = "https://new.donatepay.ru/@1409884"
 CHANNELS = ["@JustTechnic", "@baraholkamskkupiproday"]
