@@ -19,6 +19,7 @@ TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "7614009397"))
 CHANNELS = ["@JustTechnic", "@baraholkamskkupiproday"]
 DB_PATH = "market.db"
+SUPPORT_CONTACT = "@justtechnic1"
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -802,24 +803,88 @@ async def cb_remove_ad(callback: types.CallbackQuery):
 async def cb_help(callback: types.CallbackQuery):
     text = (
         "❓ **Помощь**\n\n"
-        "**Как опубликовать объявление:**\n"
-        "1. Нажмите «✅ Опубликовать» в главном меню.\n"
-        "2. Выберите «🌱 Бесплатно» (первое объявление — на 24 часа) или «💳 Платно» (на 7 дней).\n"
-        "3. Заполните поля: тип товара, модель, память, описание, цена, город, доставка.\n"
-        "4. Загрузите до 10 фото (видео не поддерживается).\n"
-        "5. Проверьте предпросмотр и отправьте на модерацию.\n"
-        "6. После одобрения объявление появится в каналах.\n\n"
-        "**Как снять объявление с продажи:**\n"
-        "«📚 Мои товары» → выберите объявление → «🗑️ Снять с продажи».\n\n"
-        "**Пробный период:**\n"
-        "Первое объявление — бесплатно на 24 часа. Далее — 25 ₽ или 25 Stars за 7 дней.\n\n"
-        "**Отмена действий:**\n"
-        "В любой момент отправьте /cancel, чтобы сбросить заполнение.\n\n"
-        "**Связь с поддержкой:**\n"
-        "@justtechnic"
+        "Здесь вы найдёте ответы на частые вопросы о публикации объявлений в JustTrade.\n\n"
+        "Выберите раздел ниже:"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
+        [InlineKeyboardButton(text="📄 Правила публикации", callback_data="help_rules")],
+        [InlineKeyboardButton(text="❔ Как выставить?", callback_data="help_howto")],
+        [InlineKeyboardButton(text="⚠️ Отказ в публикации", callback_data="help_reject")],
+        [InlineKeyboardButton(text="📚 Мои лоты", callback_data="my_ads")],
+        [InlineKeyboardButton(text="↩️ Назад", callback_data="main_menu")]
+    ])
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data == "help_rules")
+async def cb_help_rules(callback: types.CallbackQuery):
+    text = (
+        "📄 **Правила публикации**\n\n"
+        "**Что нельзя выставлять:**\n"
+        "• Запрещённые товары (оружие, наркотики, алкоголь, табак, лекарства).\n"
+        "• Товары, нарушающие авторские права (пиратские копии, взломанный софт).\n"
+        "• Животных, услуги интимного характера, финансовые пирамиды.\n"
+        "• Объявления без реальных фото товара (фото из интернета запрещены).\n"
+        "• Повторные объявления одного и того же товара от одного пользователя.\n"
+        "• Объявления с оскорблениями, нецензурной лексикой, спамом.\n\n"
+        "**Без чего нельзя выставить объявление:**\n"
+        "• Реальные фотографии товара (от 1 до 10 штук).\n"
+        "• Корректное название модели и описание состояния.\n"
+        "• Указание цены и города.\n"
+        "• Выбор способа доставки.\n"
+        "• Соблюдение тематики канала (техника и электроника).\n\n"
+        "Если объявление нарушает правила, модератор отклонит его."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="↩️ Назад", callback_data="help")]
+    ])
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data == "help_howto")
+async def cb_help_howto(callback: types.CallbackQuery):
+    text = (
+        "❔ **Как выставить объявление**\n\n"
+        "1. Нажмите «✅ Опубликовать» в главном меню.\n"
+        "2. Выберите «🌱 Бесплатно» (первое объявление — на 24 часа) или «💳 Платно» (на 7 дней).\n"
+        "3. Выберите, что хотите сделать: «💵 Продажа», «🕵🏻 Покупка» или «🔁 Обмен».\n"
+        "4. Выберите тип устройства: Телефон, Планшет, Ноутбук, Аудио, Запчасти/лот, Услуги, Прочее.\n"
+        "5. Укажите модель и ключевую особенность.\n"
+        "6. Для техники — укажите память в формате ОЗУ/ПЗУ (например, 12/256).\n"
+        "7. Напишите описание: внешний вид, состояние, комплектация, ремонты, торг.\n"
+        "8. Укажите цену (только цифры).\n"
+        "9. Укажите город.\n"
+        "10. Выберите, отправляете ли вы товар транспортной компанией.\n"
+        "11. Загрузите от 1 до 10 реальных фото товара (видео не поддерживается).\n"
+        "12. Проверьте предпросмотр и нажмите «💫 Отправка на модерацию».\n\n"
+        "После одобрения модератором объявление появится в каналах.\n\n"
+        "Отмена действий в любой момент: /cancel."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="↩️ Назад", callback_data="help")]
+    ])
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data == "help_reject")
+async def cb_help_reject(callback: types.CallbackQuery):
+    text = (
+        "⚠️ **Отказ в публикации**\n\n"
+        "Если ваше объявление отклонено, это значит, что по мнению модератора оно "
+        "не соблюдает правила публикации объявлений.\n\n"
+        "**Частые причины отказа:**\n"
+        "• Фото не соответствуют товару или взяты из интернета.\n"
+        "• Описание неполное или вводит в заблуждение.\n"
+        "• Товар запрещён к продаже.\n"
+        "• Объявление не по тематике канала.\n"
+        "• Нарушены правила оформления (нет цены, города, доставки).\n\n"
+        "**Что делать:**\n"
+        "Создайте объявление заново, исправив замечания. Нажмите «✅ Опубликовать» "
+        "в главном меню и заполните анкету снова.\n\n"
+        f"Если вы не согласны с отказом — напишите в поддержку: {SUPPORT_CONTACT}."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="↩️ Назад", callback_data="help")]
     ])
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
     await callback.answer()
