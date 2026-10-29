@@ -1,5 +1,3 @@
 aiogram
-aiohttp
 aiosqlite
-centrifuge-python
-staypresent[prod]
+aiohttp
