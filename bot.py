@@ -652,6 +652,152 @@ async def cancel(message: types.Message, state: FSMContext):
     await message.answer("Действие отменено.", reply_markup=bottom_menu())
     await show_main_menu(message)
 
+@dp.callback_query(F.data == "my_ads")
+async def cb_my_ads(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM listings WHERE user_id = ? AND status = 'ACTIVE' ORDER BY id DESC",
+            (user_id,)
+        ) as cur:
+            ads = await cur.fetchall()
+
+    if not ads:
+        await callback.message.answer("У вас нет активных объявлений.")
+        await callback.answer()
+        return
+
+    kb = []
+    for ad in ads:
+        kb.append([InlineKeyboardButton(
+            text=f"{ad['model']} ({ad['price']} руб.)",
+            callback_data=f"lot_{ad['id']}"
+        )])
+    kb.append([InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")])
+
+    await callback.message.answer(
+        f"📃 Мои объявления\n{len(ads)} в канале\n\n"
+        "Нажми на объявление ниже - там все функции.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
+    )
+    await callback.answer()
+
+@dp.message(F.text == "📚 Мои лоты")
+async def my_lots_message(message: types.Message):
+    user_id = message.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM listings WHERE user_id = ? AND status = 'ACTIVE' ORDER BY id DESC",
+            (user_id,)
+        ) as cur:
+            ads = await cur.fetchall()
+
+    if not ads:
+        await message.answer("У вас нет активных объявлений.")
+        return
+
+    kb = []
+    for ad in ads:
+        kb.append([InlineKeyboardButton(
+            text=f"{ad['model']} ({ad['price']} руб.)",
+            callback_data=f"lot_{ad['id']}"
+        )])
+    kb.append([InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")])
+
+    await message.answer(
+        f"📃 Мои объявления\n{len(ads)} в канале\n\n"
+        "Нажми на объявление ниже - там все функции.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
+    )
+
+@dp.callback_query(F.data.startswith("lot_"))
+async def cb_lot_details(callback: types.CallbackQuery):
+    lot_id = int(callback.data.split("_")[1])
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM listings WHERE id = ?", (lot_id,)) as cur:
+            ad = await cur.fetchone()
+    if not ad:
+        await callback.answer("Объявление не найдено", show_alert=True)
+        return
+
+    link = ""
+    if ad["channel"] and ad["message_id"]:
+        link = f"https://t.me/{ad['channel'].lstrip('@')}/{ad['message_id']}"
+
+    text = (
+        f"{ad['model']}\n"
+        f"{ad['price']} руб.\n"
+        f"{ad['city']}\n"
+        f"В канале с {ad['created_at'][:10] if ad['created_at'] else '—'}"
+    )
+
+    kb = []
+    if link:
+        kb.append([InlineKeyboardButton(text="🔗 Открыть в канале", url=link)])
+    kb.append([InlineKeyboardButton(text="🗑️ Снять с продажи", callback_data=f"remove_{lot_id}")])
+    kb.append([InlineKeyboardButton(text="↩️ Назад", callback_data="my_ads")])
+
+    await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("remove_"))
+async def cb_remove_ad(callback: types.CallbackQuery):
+    lot_id = int(callback.data.split("_")[1])
+    user_id = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM listings WHERE id = ? AND user_id = ? AND status = 'ACTIVE'",
+            (lot_id, user_id)
+        ) as cur:
+            ad = await cur.fetchone()
+        if not ad:
+            await callback.answer("Объявление не найдено или уже снято.", show_alert=True)
+            return
+        await db.execute("UPDATE listings SET status = 'SOLD' WHERE id = ?", (lot_id,))
+        await db.commit()
+
+    try:
+        await bot.edit_message_caption(
+            chat_id=ad["channel"], message_id=ad["message_id"],
+            caption=f"**ПРОДАНО**\n\n{ad['description']}",
+            parse_mode="Markdown"
+        )
+    except Exception:
+        pass
+
+    await callback.message.edit_text("Объявление снято с продажи.")
+    await callback.answer()
+
+@dp.callback_query(F.data == "help")
+async def cb_help(callback: types.CallbackQuery):
+    text = (
+        "❓ **Помощь**\n\n"
+        "**Как опубликовать объявление:**\n"
+        "1. Нажмите «✅ Опубликовать» в главном меню.\n"
+        "2. Выберите «🌱 Бесплатно» (первое объявление — на 24 часа) или «💳 Платно» (на 7 дней).\n"
+        "3. Заполните поля: тип товара, модель, память, описание, цена, город, доставка.\n"
+        "4. Загрузите до 10 фото (видео не поддерживается).\n"
+        "5. Проверьте предпросмотр и отправьте на модерацию.\n"
+        "6. После одобрения объявление появится в каналах.\n\n"
+        "**Как снять объявление с продажи:**\n"
+        "«📚 Мои товары» → выберите объявление → «🗑️ Снять с продажи».\n\n"
+        "**Пробный период:**\n"
+        "Первое объявление — бесплатно на 24 часа. Далее — 25 ₽ или 25 Stars за 7 дней.\n\n"
+        "**Отмена действий:**\n"
+        "В любой момент отправьте /cancel, чтобы сбросить заполнение.\n\n"
+        "**Связь с поддержкой:**\n"
+        "@justtechnic"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
+    ])
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
+
 async def on_startup(bot: Bot):
     base_url = os.getenv("RENDER_EXTERNAL_URL")
     if base_url:
