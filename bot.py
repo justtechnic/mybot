@@ -148,6 +148,44 @@ def step_kb(back_callback: str):
         [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
     ])
 
+def escape_md(text: str) -> str:
+    for ch in ["_", "*", "`", "["]:
+        text = text.replace(ch, "\\" + ch)
+    return text
+
+def build_post_text(ad, status="АКТУАЛЬНО", author_tag=None):
+    if status == "ПРОДАНО":
+        header = "❌ПРОДАНО❌"
+    else:
+        header = "✅АКТУАЛЬНО✅"
+
+    tag = author_tag
+    if not tag:
+        try:
+            tag = ad["author_tag"]
+        except (KeyError, IndexError):
+            tag = ad["user_id"]
+
+    safe_category = escape_md(ad["category"])
+    safe_city = escape_md(ad["city"])
+    safe_desc = escape_md(ad["description"])
+    safe_price = escape_md(ad["price"])
+    safe_delivery = escape_md(ad["delivery"])
+    safe_memory = escape_md(ad["memory"]) if ad["memory"] and ad["memory"] != "—" else None
+    safe_tag = escape_md(str(tag))
+
+    text = f"{header}\n#{safe_category}\n#{safe_city}\n\n"
+    if safe_memory:
+        text += f"💾Память: {safe_memory}\n\n"
+    text += (
+        f"{safe_desc}\n\n"
+        f"🇷🇺{safe_city}\n"
+        f"💸{safe_price}\n"
+        f"🚛{safe_delivery}\n\n"
+        f"🥷🏻{safe_tag}"
+    )
+    return text
+
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -573,20 +611,7 @@ async def approve_ad(callback: types.CallbackQuery):
             author_tag = f"@{author.username}" if author.username else author.first_name
         except Exception:
             author_tag = str(row['user_id'])
-        post_text = (
-            f"✅АКТУАЛЬНО✅\n"
-            f"#{row['category']}\n"
-            f"#{row['city']}\n\n"
-        )
-        if row['memory'] and row['memory'] != "—":
-            post_text += f"💾Память: {row['memory']}\n\n"
-        post_text += (
-            f"{row['description']}\n\n"
-            f"🇷🇺{row['city']}\n"
-            f"💸{row['price']}\n"
-            f"🚛{row['delivery']}\n\n"
-            f"🥷🏻{author_tag}"
-        )
+        post_text = build_post_text(row, status="АКТУАЛЬНО", author_tag=author_tag)
         photos = row['photos'].split(",") if row['photos'] else []
         saved_pairs = []
         first_channel = ""
@@ -785,7 +810,13 @@ async def cb_remove_ad(callback: types.CallbackQuery):
         await db.execute("UPDATE listings SET status = 'SOLD' WHERE id = ?", (lot_id,))
         await db.commit()
 
-    new_caption = f"**ПРОДАНО**\n\n{ad['description']}"
+    try:
+        author = await bot.get_chat(ad['user_id'])
+        tag = f"@{author.username}" if author.username else author.first_name
+    except Exception:
+        tag = str(ad['user_id'])
+    new_caption = build_post_text(ad, status="ПРОДАНО", author_tag=tag)
+
     pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
     if not pairs and ad["channel"] and ad["message_id"]:
         pairs = [f"{ad['channel']}:{ad['message_id']}"]
@@ -810,11 +841,6 @@ async def cb_remove_ad(callback: types.CallbackQuery):
 
     await callback.message.edit_text("Объявление снято с продажи.")
     await callback.answer()
-
-def escape_md(text: str) -> str:
-    for ch in ["_", "*", "`", "["]:
-        text = text.replace(ch, "\\" + ch)
-    return text
 
 async def build_profile_text(user_id: int, first_name: str, username: str):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -993,7 +1019,13 @@ async def expire_loop():
                     await db.execute("UPDATE listings SET status = 'SOLD' WHERE id = ?", (ad["id"],))
                     await db.commit()
 
-                new_caption = f"**ПРОДАНО**\n\n{ad['description']}"
+                try:
+                    author = await bot.get_chat(ad['user_id'])
+                    tag = f"@{author.username}" if author.username else author.first_name
+                except Exception:
+                    tag = str(ad['user_id'])
+                new_caption = build_post_text(ad, status="ПРОДАНО", author_tag=tag)
+
                 pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
                 if not pairs and ad["channel"] and ad["message_id"]:
                     pairs = [f"{ad['channel']}:{ad['message_id']}"]
@@ -1054,20 +1086,12 @@ async def renew_cb(callback: types.CallbackQuery):
         )
         await db.commit()
 
-    new_caption = (
-        f"✅АКТУАЛЬНО✅\n"
-        f"#{ad['category']}\n"
-        f"#{ad['city']}\n\n"
-    )
-    if ad["memory"] and ad["memory"] != "—":
-        new_caption += f"💾Память: {ad['memory']}\n\n"
-    new_caption += (
-        f"{ad['description']}\n\n"
-        f"🇷🇺{ad['city']}\n"
-        f"💸{ad['price']}\n"
-        f"🚛{ad['delivery']}\n\n"
-        f"🥷🏻{ad['user_id']}"
-    )
+    try:
+        author = await bot.get_chat(ad['user_id'])
+        tag = f"@{author.username}" if author.username else author.first_name
+    except Exception:
+        tag = str(ad['user_id'])
+    new_caption = build_post_text(ad, status="АКТУАЛЬНО", author_tag=tag)
 
     pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
     if not pairs and ad["channel"] and ad["message_id"]:
