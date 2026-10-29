@@ -1,7 +1,7 @@
 import os
 import asyncio
 import aiosqlite
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
@@ -55,9 +55,14 @@ async def init_db():
                 expires_at TIMESTAMP,
                 is_trial BOOLEAN DEFAULT 0,
                 channel TEXT,
-                message_id INTEGER
+                message_id INTEGER,
+                message_ids TEXT
             )
         """)
+        try:
+            await db.execute("ALTER TABLE listings ADD COLUMN message_ids TEXT")
+        except Exception:
+            pass
         await db.commit()
 
 async def save_listing(user_id, data, status='PENDING_MODERATION', is_trial=False):
@@ -570,6 +575,9 @@ async def approve_ad(callback: types.CallbackQuery):
             f"🥷🏻{author_tag}"
         )
         photos = row['photos'].split(",") if row['photos'] else []
+        saved_pairs = []
+        first_channel = ""
+        first_message_id = 0
         for channel in CHANNELS:
             try:
                 if photos:
@@ -586,12 +594,16 @@ async def approve_ad(callback: types.CallbackQuery):
                         sent = sent_msgs[0]
                 else:
                     sent = await bot.send_message(chat_id=channel, text=post_text)
-                await db.execute(
-                    "UPDATE listings SET status = 'ACTIVE', channel = ?, message_id = ? WHERE id = ?",
-                    (channel, sent.message_id, lot_id)
-                )
+                saved_pairs.append(f"{channel}:{sent.message_id}")
+                if not first_channel:
+                    first_channel = channel
+                    first_message_id = sent.message_id
             except Exception as e:
                 print(f"Ошибка публикации: {e}")
+        await db.execute(
+            "UPDATE listings SET status = 'ACTIVE', channel = ?, message_id = ?, message_ids = ? WHERE id = ?",
+            (first_channel, first_message_id, ",".join(saved_pairs), lot_id)
+        )
         await db.commit()
     try:
         await bot.send_message(
@@ -761,19 +773,27 @@ async def cb_remove_ad(callback: types.CallbackQuery):
         await db.commit()
 
     new_caption = f"**ПРОДАНО**\n\n{ad['description']}"
-    try:
-        await bot.edit_message_caption(
-            chat_id=ad["channel"], message_id=ad["message_id"],
-            caption=new_caption, parse_mode="Markdown"
-        )
-    except Exception:
+    pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
+    if not pairs and ad["channel"] and ad["message_id"]:
+        pairs = [f"{ad['channel']}:{ad['message_id']}"]
+    for pair in pairs:
+        pair = pair.strip()
+        if ":" not in pair:
+            continue
+        ch, mid = pair.rsplit(":", 1)
         try:
-            await bot.edit_message_text(
-                chat_id=ad["channel"], message_id=ad["message_id"],
-                text=new_caption, parse_mode="Markdown"
+            await bot.edit_message_caption(
+                chat_id=ch, message_id=int(mid),
+                caption=new_caption, parse_mode="Markdown"
             )
-        except Exception as e:
-            print(f"Не удалось отредактировать пост #{lot_id}: {e}")
+        except Exception:
+            try:
+                await bot.edit_message_text(
+                    chat_id=ch, message_id=int(mid),
+                    text=new_caption, parse_mode="Markdown"
+                )
+            except Exception as e:
+                print(f"Не удалось отредактировать {ch}/{mid}: {e}")
 
     await callback.message.edit_text("Объявление снято с продажи.")
     await callback.answer()
@@ -804,6 +824,124 @@ async def cb_help(callback: types.CallbackQuery):
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
     await callback.answer()
 
+async def expire_loop():
+    while True:
+        try:
+            now = datetime.now().isoformat()
+            async with aiosqlite.connect(DB_PATH) as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT * FROM listings WHERE status = 'ACTIVE' AND expires_at IS NOT NULL AND expires_at <= ?",
+                    (now,)
+                ) as cur:
+                    expired = await cur.fetchall()
+
+            for ad in expired:
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute("UPDATE listings SET status = 'SOLD' WHERE id = ?", (ad["id"],))
+                    await db.commit()
+
+                new_caption = f"**ПРОДАНО**\n\n{ad['description']}"
+                pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
+                if not pairs and ad["channel"] and ad["message_id"]:
+                    pairs = [f"{ad['channel']}:{ad['message_id']}"]
+                for pair in pairs:
+                    pair = pair.strip()
+                    if ":" not in pair:
+                        continue
+                    ch, mid = pair.rsplit(":", 1)
+                    try:
+                        await bot.edit_message_caption(
+                            chat_id=ch, message_id=int(mid),
+                            caption=new_caption, parse_mode="Markdown"
+                        )
+                    except Exception:
+                        try:
+                            await bot.edit_message_text(
+                                chat_id=ch, message_id=int(mid),
+                                text=new_caption, parse_mode="Markdown"
+                            )
+                        except Exception as e:
+                            print(f"Ошибка редактирования {ch}/{mid}: {e}")
+
+                try:
+                    await bot.send_message(
+                        ad["user_id"],
+                        f"У вашего объявления «{ad['model']}» кончился срок публикации. Хотите ли вы его продлить?",
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="💸 Продлить", callback_data=f"renew_{ad['id']}")],
+                            [InlineKeyboardButton(text="🗑️ Снять с продажи", callback_data=f"remove_{ad['id']}")]
+                        ])
+                    )
+                except Exception as e:
+                    print(f"Не удалось уведомить {ad['user_id']}: {e}")
+        except Exception as e:
+            print(f"Ошибка в expire_loop: {e}")
+        await asyncio.sleep(60)
+
+@dp.callback_query(F.data.startswith("renew_"))
+async def renew_cb(callback: types.CallbackQuery):
+    lot_id = int(callback.data.split("_")[1])
+    user_id = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM listings WHERE id = ? AND user_id = ?",
+            (lot_id, user_id)
+        ) as cur:
+            ad = await cur.fetchone()
+    if not ad:
+        await callback.answer("Объявление не найдено.", show_alert=True)
+        return
+
+    new_expires = (datetime.now() + timedelta(days=7)).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE listings SET status = 'ACTIVE', expires_at = ? WHERE id = ?",
+            (new_expires, lot_id)
+        )
+        await db.commit()
+
+    new_caption = (
+        f"✅АКТУАЛЬНО✅\n"
+        f"#{ad['category']}\n"
+        f"#{ad['city']}\n\n"
+    )
+    if ad["memory"] and ad["memory"] != "—":
+        new_caption += f"💾Память: {ad['memory']}\n\n"
+    new_caption += (
+        f"{ad['description']}\n\n"
+        f"🇷🇺{ad['city']}\n"
+        f"💸{ad['price']}\n"
+        f"🚛{ad['delivery']}\n\n"
+        f"🥷🏻{ad['user_id']}"
+    )
+
+    pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
+    if not pairs and ad["channel"] and ad["message_id"]:
+        pairs = [f"{ad['channel']}:{ad['message_id']}"]
+    for pair in pairs:
+        pair = pair.strip()
+        if ":" not in pair:
+            continue
+        ch, mid = pair.rsplit(":", 1)
+        try:
+            await bot.edit_message_caption(
+                chat_id=ch, message_id=int(mid),
+                caption=new_caption, parse_mode="Markdown"
+            )
+        except Exception:
+            try:
+                await bot.edit_message_text(
+                    chat_id=ch, message_id=int(mid),
+                    text=new_caption, parse_mode="Markdown"
+                )
+            except Exception as e:
+                print(f"Не удалось отредактировать {ch}/{mid}: {e}")
+
+    await callback.message.edit_text("Публикация продлена на 7 дней.")
+    await callback.answer()
+
 async def on_startup(bot: Bot):
     base_url = os.getenv("RENDER_EXTERNAL_URL")
     if base_url:
@@ -823,6 +961,7 @@ async def main():
     webhook_requests_handler.register(app, path="/webhook")
     dp.startup.register(on_startup)
     setup_application(app, dp, bot=bot)
+    asyncio.create_task(expire_loop())
     port = int(os.getenv("PORT", 8080))
     runner = web.AppRunner(app)
     await runner.setup()
