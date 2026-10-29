@@ -148,10 +148,8 @@ def step_kb(back_callback: str):
         [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
     ])
 
-def escape_md(text: str) -> str:
-    for ch in ["_", "*", "`", "["]:
-        text = text.replace(ch, "\\" + ch)
-    return text
+def escape_html(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 def build_post_text(ad, status="АКТУАЛЬНО", author_tag=None):
     if status == "ПРОДАНО":
@@ -166,15 +164,16 @@ def build_post_text(ad, status="АКТУАЛЬНО", author_tag=None):
         except (KeyError, IndexError):
             tag = ad["user_id"]
 
-    safe_category = escape_md(ad["category"])
-    safe_city = escape_md(ad["city"])
-    safe_desc = escape_md(ad["description"])
-    safe_price = escape_md(ad["price"])
-    safe_delivery = escape_md(ad["delivery"])
-    safe_memory = escape_md(ad["memory"]) if ad["memory"] and ad["memory"] != "—" else None
-    safe_tag = escape_md(str(tag))
+    safe_model = escape_html(ad["model"])
+    safe_category = escape_html(ad["category"])
+    safe_city = escape_html(ad["city"])
+    safe_desc = escape_html(ad["description"])
+    safe_price = escape_html(ad["price"])
+    safe_delivery = escape_html(ad["delivery"])
+    safe_memory = escape_html(ad["memory"]) if ad["memory"] and ad["memory"] != "—" else None
 
     text = f"{header}\n#{safe_category}\n#{safe_city}\n\n"
+    text += f"📦 {safe_model}\n\n"
     if safe_memory:
         text += f"💾Память: {safe_memory}\n\n"
     text += (
@@ -182,7 +181,7 @@ def build_post_text(ad, status="АКТУАЛЬНО", author_tag=None):
         f"🇷🇺{safe_city}\n"
         f"💸{safe_price}\n"
         f"🚛{safe_delivery}\n\n"
-        f"🥷🏻{safe_tag}"
+        f"🥷🏻{tag}"
     )
     return text
 
@@ -274,7 +273,7 @@ async def cb_category(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(category=category_name)
     await state.set_state(AdForm.entering_model)
     await callback.message.edit_text(
-        f"{category_name}.\n\nНапишите модель устройства и ключевую особенность.",
+        f"{category_name}.\n\nНапишите модель устройства или ключевую особенность.",
         reply_markup=step_kb("back_to_category")
     )
     await callback.answer()
@@ -323,7 +322,7 @@ async def back_to_model_from_memory(callback: types.CallbackQuery, state: FSMCon
     data = await state.get_data()
     await state.set_state(AdForm.entering_model)
     await callback.message.edit_text(
-        f"{data['category']}.\n\nНапишите модель устройства и ключевую особенность.",
+        f"{data['category']}.\n\nНапишите модель устройства или ключевую особенность.",
         reply_markup=step_kb("back_to_category")
     )
     await callback.answer()
@@ -346,7 +345,7 @@ async def back_to_memory(callback: types.CallbackQuery, state: FSMContext):
     if data.get('memory') == "—":
         await state.set_state(AdForm.entering_model)
         await callback.message.edit_text(
-            f"{data['category']}.\n\nНапишите модель устройства и ключевую особенность.",
+            f"{data['category']}.\n\nНапишите модель устройства или ключевую особенность.",
             reply_markup=step_kb("back_to_category")
         )
     else:
@@ -494,6 +493,7 @@ async def photos_done(callback: types.CallbackQuery, state: FSMContext):
         f"✅АКТУАЛЬНО✅\n"
         f"#{data['category']}\n"
         f"#{data['city']}\n\n"
+        f"📦 {data['model']}\n\n"
     )
     if data.get('memory') and data['memory'] != "—":
         preview_text += f"💾Память: {data['memory']}\n\n"
@@ -620,18 +620,18 @@ async def approve_ad(callback: types.CallbackQuery):
             try:
                 if photos:
                     if len(photos) == 1:
-                        sent = await bot.send_photo(chat_id=channel, photo=photos[0], caption=post_text)
+                        sent = await bot.send_photo(chat_id=channel, photo=photos[0], caption=post_text, parse_mode="HTML")
                     else:
                         media = []
                         for i, ph in enumerate(photos):
                             if i == 0:
-                                media.append(InputMediaPhoto(media=ph, caption=post_text))
+                                media.append(InputMediaPhoto(media=ph, caption=post_text, parse_mode="HTML"))
                             else:
                                 media.append(InputMediaPhoto(media=ph))
                         sent_msgs = await bot.send_media_group(chat_id=channel, media=media)
                         sent = sent_msgs[0]
                 else:
-                    sent = await bot.send_message(chat_id=channel, text=post_text)
+                    sent = await bot.send_message(chat_id=channel, text=post_text, parse_mode="HTML")
                 saved_pairs.append(f"{channel}:{sent.message_id}")
                 if not first_channel:
                     first_channel = channel
@@ -828,13 +828,13 @@ async def cb_remove_ad(callback: types.CallbackQuery):
         try:
             await bot.edit_message_caption(
                 chat_id=ch, message_id=int(mid),
-                caption=new_caption, parse_mode="Markdown"
+                caption=new_caption, parse_mode="HTML"
             )
         except Exception:
             try:
                 await bot.edit_message_text(
                     chat_id=ch, message_id=int(mid),
-                    text=new_caption, parse_mode="Markdown"
+                    text=new_caption, parse_mode="HTML"
                 )
             except Exception as e:
                 print(f"Не удалось отредактировать {ch}/{mid}: {e}")
@@ -865,16 +865,16 @@ async def build_profile_text(user_id: int, first_name: str, username: str):
 
     ads_lines = ""
     for ad in ads:
-        safe_model = escape_md(ad["model"])
+        safe_model = escape_html(ad["model"])
         if ad["channel"] and ad["message_id"]:
             link = f"https://t.me/{ad['channel'].lstrip('@')}/{ad['message_id']}"
-            ads_lines += f"• [{safe_model}]({link})\n"
+            ads_lines += f'• <a href="{link}">{safe_model}</a>\n'
         else:
             ads_lines += f"• {safe_model}\n"
 
-    username_str = f"@{escape_md(username)}" if username else "нет"
+    username_str = f"@{username}" if username else "нет"
     text = (
-        f"👤 {escape_md(first_name)}\n"
+        f"👤 {escape_html(first_name)}\n"
         f"Профиль в JustTrade создан {first_seen}\n"
         f"Объявления: {active} актуально\n"
         f"Продано: {sold}\n"
@@ -895,7 +895,7 @@ async def cb_profile(callback: types.CallbackQuery):
         [InlineKeyboardButton(text="📚 Мои лоты", callback_data="my_ads")],
         [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
     ])
-    await callback.message.answer(text, reply_markup=kb, parse_mode="Markdown", disable_web_page_preview=True)
+    await callback.message.answer(text, reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True)
     await callback.answer()
 
 @dp.message(F.text == "🥷🏻 Профиль")
@@ -910,12 +910,12 @@ async def profile_message(message: types.Message):
         [InlineKeyboardButton(text="📚 Мои лоты", callback_data="my_ads")],
         [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
     ])
-    await message.answer(text, reply_markup=kb, parse_mode="Markdown", disable_web_page_preview=True)
+    await message.answer(text, reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True)
 
 @dp.callback_query(F.data == "help")
 async def cb_help(callback: types.CallbackQuery):
     text = (
-        "❓ **Помощь**\n\n"
+        "❓ <b>Помощь</b>\n\n"
         "Здесь вы найдёте ответы на частые вопросы о публикации объявлений в JustTrade.\n\n"
         "Выберите раздел ниже:"
     )
@@ -926,21 +926,21 @@ async def cb_help(callback: types.CallbackQuery):
         [InlineKeyboardButton(text="📚 Мои лоты", callback_data="my_ads")],
         [InlineKeyboardButton(text="↩️ Назад", callback_data="main_menu")]
     ])
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 @dp.callback_query(F.data == "help_rules")
 async def cb_help_rules(callback: types.CallbackQuery):
     text = (
-        "📄 **Правила публикации**\n\n"
-        "**Что нельзя выставлять:**\n"
+        "📄 <b>Правила публикации</b>\n\n"
+        "<b>Что нельзя выставлять:</b>\n"
         "• Запрещённые товары (оружие, наркотики, алкоголь, табак, лекарства).\n"
         "• Товары, нарушающие авторские права (пиратские копии, взломанный софт).\n"
         "• Животных, услуги интимного характера, финансовые пирамиды.\n"
         "• Объявления без реальных фото товара (фото из интернета запрещены).\n"
         "• Повторные объявления одного и того же товара от одного пользователя.\n"
         "• Объявления с оскорблениями, нецензурной лексикой, спамом.\n\n"
-        "**Без чего нельзя выставить объявление:**\n"
+        "<b>Без чего нельзя выставить объявление:</b>\n"
         "• Реальные фотографии товара (от 1 до 10 штук).\n"
         "• Корректное название модели и описание состояния.\n"
         "• Указание цены и города.\n"
@@ -951,18 +951,18 @@ async def cb_help_rules(callback: types.CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="↩️ Назад", callback_data="help")]
     ])
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 @dp.callback_query(F.data == "help_howto")
 async def cb_help_howto(callback: types.CallbackQuery):
     text = (
-        "❔ **Как выставить объявление**\n\n"
+        "❔ <b>Как выставить объявление</b>\n\n"
         "1. Нажмите «✅ Опубликовать» в главном меню.\n"
         "2. Выберите «🌱 Бесплатно» (первое объявление — на 24 часа) или «💳 Платно» (на 7 дней).\n"
         "3. Выберите, что хотите сделать: «💵 Продажа», «🕵🏻 Покупка» или «🔁 Обмен».\n"
         "4. Выберите тип устройства: Телефон, Планшет, Ноутбук, Аудио, Запчасти/лот, Услуги, Прочее.\n"
-        "5. Укажите модель и ключевую особенность.\n"
+        "5. Укажите модель или ключевую особенность.\n"
         "6. Для техники — укажите память в формате ОЗУ/ПЗУ (например, 12/256).\n"
         "7. Напишите описание: внешний вид, состояние, комплектация, ремонты, торг.\n"
         "8. Укажите цену (только цифры).\n"
@@ -976,22 +976,22 @@ async def cb_help_howto(callback: types.CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="↩️ Назад", callback_data="help")]
     ])
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 @dp.callback_query(F.data == "help_reject")
 async def cb_help_reject(callback: types.CallbackQuery):
     text = (
-        "⚠️ **Отказ в публикации**\n\n"
+        "⚠️ <b>Отказ в публикации</b>\n\n"
         "Если ваше объявление отклонено, это значит, что по мнению модератора оно "
         "не соблюдает правила публикации объявлений.\n\n"
-        "**Частые причины отказа:**\n"
+        "<b>Частые причины отказа:</b>\n"
         "• Фото не соответствуют товару или взяты из интернета.\n"
         "• Описание неполное или вводит в заблуждение.\n"
         "• Товар запрещён к продаже.\n"
         "• Объявление не по тематике канала.\n"
         "• Нарушены правила оформления (нет цены, города, доставки).\n\n"
-        "**Что делать:**\n"
+        "<b>Что делать:</b>\n"
         "Создайте объявление заново, исправив замечания. Нажмите «✅ Опубликовать» "
         "в главном меню и заполните анкету снова.\n\n"
         f"Если вы не согласны с отказом — напишите в поддержку: {SUPPORT_CONTACT}."
@@ -999,7 +999,7 @@ async def cb_help_reject(callback: types.CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="↩️ Назад", callback_data="help")]
     ])
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 async def expire_loop():
@@ -1037,13 +1037,13 @@ async def expire_loop():
                     try:
                         await bot.edit_message_caption(
                             chat_id=ch, message_id=int(mid),
-                            caption=new_caption, parse_mode="Markdown"
+                            caption=new_caption, parse_mode="HTML"
                         )
                     except Exception:
                         try:
                             await bot.edit_message_text(
                                 chat_id=ch, message_id=int(mid),
-                                text=new_caption, parse_mode="Markdown"
+                                text=new_caption, parse_mode="HTML"
                             )
                         except Exception as e:
                             print(f"Ошибка редактирования {ch}/{mid}: {e}")
@@ -1104,13 +1104,13 @@ async def renew_cb(callback: types.CallbackQuery):
         try:
             await bot.edit_message_caption(
                 chat_id=ch, message_id=int(mid),
-                caption=new_caption, parse_mode="Markdown"
+                caption=new_caption, parse_mode="HTML"
             )
         except Exception:
             try:
                 await bot.edit_message_text(
                     chat_id=ch, message_id=int(mid),
-                    text=new_caption, parse_mode="Markdown"
+                    text=new_caption, parse_mode="HTML"
                 )
             except Exception as e:
                 print(f"Не удалось отредактировать {ch}/{mid}: {e}")
