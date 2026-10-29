@@ -660,9 +660,13 @@ async def on_startup(bot: Bot):
     else:
         print("RENDER_EXTERNAL_URL не задан")
 
+async def health_check(request):
+    return web.json_response({"status": "ok"})
+
 async def main():
     await init_db()
     app = web.Application()
+    app.router.add_get("/", health_check)
     webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     webhook_requests_handler.register(app, path="/webhook")
     dp.startup.register(on_startup)
