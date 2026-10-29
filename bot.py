@@ -418,7 +418,7 @@ async def process_photo(message: types.Message, state: FSMContext):
         return
     photos.append(message.photo[-1].file_id)
     await state.update_data(photos=photos)
-    await message.answer(f"Загружено {len(photos)} фотографий из 10")
+    await message.answer(f"Загружено фотографий {len(photos)} из 10")
 
 @dp.message(AdForm.uploading_photos, F.video)
 async def reject_video(message: types.Message, state: FSMContext):
@@ -471,17 +471,21 @@ async def photos_done(callback: types.CallbackQuery, state: FSMContext):
 async def back_to_photos(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     await state.set_state(AdForm.uploading_photos)
-    await callback.message.edit_caption(
-        caption=f"{data['category']}, 📸Фотографии\n\n"
-                "Покажите фото товара, которое сейчас опубликуете.\n\n"
-                "Фото обязательно! До 10 штук.\n\n"
-                "Как отправили все что хотели опубликовать - нажмите \"✅Готово!\"",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Готово!", callback_data="photos_done")],
-            [InlineKeyboardButton(text="↩️ Назад", callback_data="back_to_delivery")],
-            [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
-        ])
+    text = (
+        f"{data['category']}, 📸Фотографии\n\n"
+        "Покажите фото товара, которое сейчас опубликуете.\n\n"
+        "Фото обязательно! До 10 штук.\n\n"
+        "Как отправили все что хотели опубликовать - нажмите \"✅Готово!\""
     )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Готово!", callback_data="photos_done")],
+        [InlineKeyboardButton(text="↩️ Назад", callback_data="back_to_delivery")],
+        [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
+    ])
+    try:
+        await callback.message.edit_caption(caption=text, reply_markup=kb)
+    except Exception:
+        await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()
 
 @dp.callback_query(F.data == "send_moderation", AdForm.preview)
@@ -489,11 +493,15 @@ async def send_moderation(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     user_id = callback.from_user.id
     lot_id = await save_listing(user_id, data, status='PENDING_MODERATION', is_trial=True)
-    await callback.message.edit_caption(
-        caption="Объявление отправлено на модерацию!\n\n"
-                "Как только модератор примет пост - придёт уведомление вам в чат с ботом, а статус появится в разделе \"Мои объявления\"",
-        reply_markup=None
+    moderation_text = (
+        "Объявление отправлено на модерацию!\n\n"
+        "Как только модератор примет пост - придёт уведомление вам в чат с ботом, а статус появится в разделе \"Мои объявления\""
     )
+    try:
+        await callback.message.edit_caption(caption=moderation_text, reply_markup=None)
+    except Exception:
+        await callback.message.edit_text(moderation_text, reply_markup=None)
+
     admin_text = (
         f"🔔 Новое объявление на модерации #{lot_id}\n\n"
         f"Пользователь: {callback.from_user.first_name} (@{callback.from_user.username})\n"
@@ -596,7 +604,10 @@ async def approve_ad(callback: types.CallbackQuery):
         )
     except Exception:
         pass
-    await callback.message.edit_caption(caption="Объявление одобрено и опубликовано.")
+    try:
+        await callback.message.edit_caption(caption="Объявление одобрено и опубликовано.")
+    except Exception:
+        await callback.message.edit_text("Объявление одобрено и опубликовано.")
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("reject_"))
@@ -622,7 +633,10 @@ async def reject_ad(callback: types.CallbackQuery):
             )
         except Exception:
             pass
-    await callback.message.edit_caption(caption="Объявление отклонено.")
+    try:
+        await callback.message.edit_caption(caption="Объявление отклонено.")
+    except Exception:
+        await callback.message.edit_text("Объявление отклонено.")
     await callback.answer()
 
 @dp.callback_query(F.data == "reset_ad")
