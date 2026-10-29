@@ -104,6 +104,7 @@ def ad_type_kb():
         [InlineKeyboardButton(text="💵 Продажа", callback_data="adtype_sell")],
         [InlineKeyboardButton(text="🕵🏻 Покупка", callback_data="adtype_buy")],
         [InlineKeyboardButton(text="🔁 Обмен", callback_data="adtype_exchange")],
+        [InlineKeyboardButton(text="↩️ Назад", callback_data="pub_free")],
         [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
     ])
 
@@ -116,6 +117,7 @@ def category_kb():
         [InlineKeyboardButton(text="🧩 Запчасти/лот", callback_data="cat_parts")],
         [InlineKeyboardButton(text="🔨 Услуги", callback_data="cat_services")],
         [InlineKeyboardButton(text="🎮 Прочее", callback_data="cat_other")],
+        [InlineKeyboardButton(text="↩️ Назад", callback_data="free_continue")],
         [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
     ])
 
@@ -123,11 +125,18 @@ def delivery_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Отправлю", callback_data="del_yes")],
         [InlineKeyboardButton(text="❌ Не отправлю", callback_data="del_no")],
+        [InlineKeyboardButton(text="↩️ Назад", callback_data="back_to_city")],
         [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
     ])
 
 def back_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
+    ])
+
+def step_kb(back_callback: str):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="↩️ Назад", callback_data=back_callback)],
         [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
     ])
 
@@ -209,11 +218,28 @@ async def cb_category(callback: types.CallbackQuery, state: FSMContext):
         "phone": "Телефон", "tablet": "Планшет", "laptop": "Ноутбук",
         "audio": "Аудио", "parts": "Запчасти/лот", "services": "Услуги", "other": "Прочее"
     }
-    await state.update_data(category=cat_names.get(cat, cat))
+    category_name = cat_names.get(cat, cat)
+    await state.update_data(category=category_name)
     await state.set_state(AdForm.entering_model)
     await callback.message.edit_text(
-        f"{cat_names.get(cat, cat)}.\n\nНапишите модель устройства и ключевую особенность.",
-        reply_markup=back_menu_kb()
+        f"{category_name}.\n\nНапишите модель устройства и ключевую особенность.",
+        reply_markup=step_kb("back_to_category")
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "back_to_category", AdForm.entering_model)
+async def back_to_category(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(AdForm.choosing_category)
+    await callback.message.edit_text(
+        "Выберите тип устройства - для каждого есть подсказка:\n\n"
+        "📱 Телефон - кнопочные, сенсорные, раскладушки (Nokia, iPhone, Samsung)\n"
+        "📲 Планшет - iPad, Xiaomi pad, Samsung pad\n"
+        "💻 Ноутбук - нетбук, лэптоп, ноутбук (Asus, Dell и др)\n"
+        "🎧 Аудио - наушники, колонки, саундбары\n"
+        "🧩 Запчасти/лот - дисплей, АКБ и тд, несколько разных вещей\n"
+        "🔨 Услуги - ремонт техники\n"
+        "🎮 Прочее - Xbox, игры, телевизор и тд",
+        reply_markup=category_kb()
     )
     await callback.answer()
 
@@ -221,13 +247,34 @@ async def cb_category(callback: types.CallbackQuery, state: FSMContext):
 async def process_model(message: types.Message, state: FSMContext):
     await state.update_data(model=message.text)
     data = await state.get_data()
-    await state.set_state(AdForm.entering_memory)
-    await message.answer(
-        f"{data['category']}, 💾Память\n\n"
-        "Напишите память устройства, формат ОЗУ/ПЗУ.\n"
-        "Без текста Гб и без лишних символов.",
-        reply_markup=back_menu_kb()
+    category = data.get('category')
+    no_memory_categories = {"Прочее", "Услуги", "Запчасти/лот"}
+    if category in no_memory_categories:
+        await state.update_data(memory="—")
+        await state.set_state(AdForm.entering_description)
+        await message.answer(
+            f"{category}, 📃Описание\n\n"
+            "Теперь нужно сделать описание: внешний вид, состояние, комплектация, ремонты, возможен ли торг.",
+            reply_markup=step_kb("back_to_model")
+        )
+    else:
+        await state.set_state(AdForm.entering_memory)
+        await message.answer(
+            f"{category}, 💾Память\n\n"
+            "Напишите память устройства, формат ОЗУ/ПЗУ.\n"
+            "Без текста Гб и без лишних символов.",
+            reply_markup=step_kb("back_to_model")
+        )
+
+@dp.callback_query(F.data == "back_to_model", AdForm.entering_memory)
+async def back_to_model_from_memory(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    await state.set_state(AdForm.entering_model)
+    await callback.message.edit_text(
+        f"{data['category']}.\n\nНапишите модель устройства и ключевую особенность.",
+        reply_markup=step_kb("back_to_category")
     )
+    await callback.answer()
 
 @dp.message(AdForm.entering_memory)
 async def process_memory(message: types.Message, state: FSMContext):
@@ -238,8 +285,27 @@ async def process_memory(message: types.Message, state: FSMContext):
         f"{data['category']}, 📃Описание\n\n"
         "Теперь нужно сделать описание: внешний вид, состояние, комплектация, ремонты, возможен ли торг.\n"
         "Память уже указана, повторять не нужно.",
-        reply_markup=back_menu_kb()
+        reply_markup=step_kb("back_to_memory")
     )
+
+@dp.callback_query(F.data == "back_to_memory", AdForm.entering_description)
+async def back_to_memory(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    if data.get('memory') == "—":
+        await state.set_state(AdForm.entering_model)
+        await callback.message.edit_text(
+            f"{data['category']}.\n\nНапишите модель устройства и ключевую особенность.",
+            reply_markup=step_kb("back_to_category")
+        )
+    else:
+        await state.set_state(AdForm.entering_memory)
+        await callback.message.edit_text(
+            f"{data['category']}, 💾Память\n\n"
+            "Напишите память устройства, формат ОЗУ/ПЗУ.\n"
+            "Без текста Гб и без лишних символов.",
+            reply_markup=step_kb("back_to_model")
+        )
+    await callback.answer()
 
 @dp.message(AdForm.entering_description)
 async def process_description(message: types.Message, state: FSMContext):
@@ -250,8 +316,19 @@ async def process_description(message: types.Message, state: FSMContext):
         f"{data['category']}, 🪎Цена\n\n"
         "Укажите цену, которую считаете нужной.\n"
         "Валюту, точки и пробелы указывать не нужно",
-        reply_markup=back_menu_kb()
+        reply_markup=step_kb("back_to_description")
     )
+
+@dp.callback_query(F.data == "back_to_description", AdForm.entering_price)
+async def back_to_description(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    await state.set_state(AdForm.entering_description)
+    await callback.message.edit_text(
+        f"{data['category']}, 📃Описание\n\n"
+        "Теперь нужно сделать описание: внешний вид, состояние, комплектация, ремонты, возможен ли торг.",
+        reply_markup=step_kb("back_to_memory")
+    )
+    await callback.answer()
 
 @dp.message(AdForm.entering_price)
 async def process_price(message: types.Message, state: FSMContext):
@@ -266,8 +343,20 @@ async def process_price(message: types.Message, state: FSMContext):
         "Укажите город самовывоз - только название.\n"
         "Пример: Москва, Питер, Казань\n"
         "Никаких лишних символов указывать не нужно",
-        reply_markup=back_menu_kb()
+        reply_markup=step_kb("back_to_price")
     )
+
+@dp.callback_query(F.data == "back_to_price", AdForm.entering_city)
+async def back_to_price(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    await state.set_state(AdForm.entering_price)
+    await callback.message.edit_text(
+        f"{data['category']}, 🪎Цена\n\n"
+        "Укажите цену, которую считаете нужной.\n"
+        "Валюту, точки и пробелы указывать не нужно",
+        reply_markup=step_kb("back_to_description")
+    )
+    await callback.answer()
 
 @dp.message(AdForm.entering_city)
 async def process_city(message: types.Message, state: FSMContext):
@@ -280,6 +369,19 @@ async def process_city(message: types.Message, state: FSMContext):
         reply_markup=delivery_kb()
     )
 
+@dp.callback_query(F.data == "back_to_city", AdForm.choosing_delivery)
+async def back_to_city(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    await state.set_state(AdForm.entering_city)
+    await callback.message.edit_text(
+        f"{data['category']}, 🌇Город\n\n"
+        "Укажите город самовывоз - только название.\n"
+        "Пример: Москва, Питер, Казань\n"
+        "Никаких лишних символов указывать не нужно",
+        reply_markup=step_kb("back_to_price")
+    )
+    await callback.answer()
+
 @dp.callback_query(F.data.startswith("del_"), AdForm.choosing_delivery)
 async def process_delivery(callback: types.CallbackQuery, state: FSMContext):
     delivery = "Отправлю" if callback.data == "del_yes" else "Не отправлю"
@@ -287,15 +389,27 @@ async def process_delivery(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(AdForm.uploading_photos)
     data = await state.get_data()
     await callback.message.edit_text(
-        f"{data['category']}, 📸Фотографии или видео\n\n"
-        "Покажите фото или видео товара, которое сейчас опубликуете.\n\n"
-        "Фото обязательно!\n\n"
-        "Фото и видео должны быть настоящими, а не из интернета, иначе отклоним запрос на публикацию.\n\n"
+        f"{data['category']}, 📸Фотографии\n\n"
+        "Покажите фото товара, которое сейчас опубликуете.\n\n"
+        "Фото обязательно! До 10 штук.\n\n"
+        "Фото должны быть настоящими, а не из интернета, иначе отклоним запрос на публикацию.\n\n"
         "Как отправили все что хотели опубликовать - нажмите \"✅Готово!\"",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Готово!", callback_data="photos_done")],
+            [InlineKeyboardButton(text="↩️ Назад", callback_data="back_to_delivery")],
             [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
         ])
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "back_to_delivery", AdForm.uploading_photos)
+async def back_to_delivery(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    await state.set_state(AdForm.choosing_delivery)
+    await callback.message.edit_text(
+        f"{data['category']}, 🗃️Доставка\n\n"
+        "Отправите ли вы устройство через какую либо транспортную компанию?",
+        reply_markup=delivery_kb()
     )
     await callback.answer()
 
@@ -310,10 +424,15 @@ async def process_photo(message: types.Message, state: FSMContext):
     await state.update_data(photos=photos)
     await message.answer(f"Загружено {len(photos)} фотографий из 10")
 
+@dp.message(AdForm.uploading_photos, F.video)
+async def reject_video(message: types.Message, state: FSMContext):
+    await message.answer("Видео не поддерживается. Пожалуйста, отправьте фото.")
+
 @dp.callback_query(F.data == "photos_done", AdForm.uploading_photos)
 async def photos_done(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    if not data.get('photos'):
+    photos = data.get('photos', [])
+    if not photos:
         await callback.answer("Загрузите хотя бы одно фото!", show_alert=True)
         return
     await state.set_state(AdForm.preview)
@@ -323,19 +442,39 @@ async def photos_done(callback: types.CallbackQuery, state: FSMContext):
         f"✅АКТУАЛЬНО✅\n"
         f"#{data['category']}\n"
         f"#{data['city']}\n\n"
-        f"💾Память: {data['memory']}\n\n"
+    )
+    if data.get('memory') and data['memory'] != "—":
+        preview_text += f"💾Память: {data['memory']}\n\n"
+    preview_text += (
         f"{data['description']}\n\n"
         f"🇷🇺{data['city']}\n"
         f"💸{data['price']}\n"
         f"🚛{data['delivery']}\n\n"
         f"🥷🏻{callback.from_user.first_name}"
     )
-    await callback.message.answer_photo(
-        photo=data['photos'][0],
-        caption=preview_text,
+    preview_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💫 Отправка на модерацию", callback_data="send_moderation")],
+        [InlineKeyboardButton(text="↩️ Назад к фото", callback_data="back_to_photos")],
+        [InlineKeyboardButton(text="✒️ Сбросить объявление", callback_data="reset_ad")],
+        [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
+    ])
+    await callback.message.answer_photo(photo=photos[0], caption=preview_text, reply_markup=preview_kb)
+    for ph in photos[1:]:
+        await callback.message.answer_photo(photo=ph)
+    await callback.answer()
+
+@dp.callback_query(F.data == "back_to_photos", AdForm.preview)
+async def back_to_photos(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    await state.set_state(AdForm.uploading_photos)
+    await callback.message.edit_caption(
+        caption=f"{data['category']}, 📸Фотографии\n\n"
+                "Покажите фото товара, которое сейчас опубликуете.\n\n"
+                "Фото обязательно! До 10 штук.\n\n"
+                "Как отправили все что хотели опубликовать - нажмите \"✅Готово!\"",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💫 Отправка на модерацию", callback_data="send_moderation")],
-            [InlineKeyboardButton(text="✒️ Сбросить объявление", callback_data="reset_ad")],
+            [InlineKeyboardButton(text="✅ Готово!", callback_data="photos_done")],
+            [InlineKeyboardButton(text="↩️ Назад", callback_data="back_to_delivery")],
             [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
         ])
     )
@@ -356,20 +495,25 @@ async def send_moderation(callback: types.CallbackQuery, state: FSMContext):
         f"Пользователь: {callback.from_user.first_name} (@{callback.from_user.username})\n"
         f"Тип: {data['ad_type']} | Категория: {data['category']}\n"
         f"Модель: {data['model']}\n"
-        f"Память: {data['memory']}\n"
+    )
+    if data.get('memory') and data['memory'] != "—":
+        admin_text += f"Память: {data['memory']}\n"
+    admin_text += (
         f"Цена: {data['price']} | Город: {data['city']}\n"
         f"Доставка: {data['delivery']}\n"
         f"Описание: {data['description']}"
     )
-    await bot.send_photo(
-        chat_id=ADMIN_ID,
-        photo=data['photos'][0],
-        caption=admin_text,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Одобрено", callback_data=f"approve_{lot_id}")],
-            [InlineKeyboardButton(text="❌ Не одобрено", callback_data=f"reject_{lot_id}")]
-        ])
-    )
+    admin_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Одобрено", callback_data=f"approve_{lot_id}")],
+        [InlineKeyboardButton(text="❌ Не одобрено", callback_data=f"reject_{lot_id}")]
+    ])
+    photos = data.get('photos', [])
+    if photos:
+        await bot.send_photo(chat_id=ADMIN_ID, photo=photos[0], caption=admin_text, reply_markup=admin_kb)
+        for ph in photos[1:]:
+            await bot.send_photo(chat_id=ADMIN_ID, photo=ph)
+    else:
+        await bot.send_message(chat_id=ADMIN_ID, text=admin_text, reply_markup=admin_kb)
     await state.clear()
     await callback.answer()
 
@@ -390,18 +534,23 @@ async def approve_ad(callback: types.CallbackQuery):
             f"✅АКТУАЛЬНО✅\n"
             f"#{row['category']}\n"
             f"#{row['city']}\n\n"
-            f"💾Память: {row['memory']}\n\n"
+        )
+        if row['memory'] and row['memory'] != "—":
+            post_text += f"💾Память: {row['memory']}\n\n"
+        post_text += (
             f"{row['description']}\n\n"
             f"🇷🇺{row['city']}\n"
             f"💸{row['price']}\n"
             f"🚛{row['delivery']}\n\n"
-            f"🥷🏻{callback.from_user.first_name}"
+            f"🥷🏻{row['user_id']}"
         )
         photos = row['photos'].split(",") if row['photos'] else []
         for channel in CHANNELS:
             try:
                 if photos:
                     sent = await bot.send_photo(chat_id=channel, photo=photos[0], caption=post_text)
+                    for ph in photos[1:]:
+                        await bot.send_photo(chat_id=channel, photo=ph)
                 else:
                     sent = await bot.send_message(chat_id=channel, text=post_text)
                 await db.execute(
