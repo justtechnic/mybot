@@ -811,6 +811,11 @@ async def cb_remove_ad(callback: types.CallbackQuery):
     await callback.message.edit_text("Объявление снято с продажи.")
     await callback.answer()
 
+def escape_md(text: str) -> str:
+    for ch in ["_", "*", "`", "["]:
+        text = text.replace(ch, "\\" + ch)
+    return text
+
 async def build_profile_text(user_id: int, first_name: str, username: str):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -834,16 +839,16 @@ async def build_profile_text(user_id: int, first_name: str, username: str):
 
     ads_lines = ""
     for ad in ads:
-        safe_model = ad["model"].replace("[", "(").replace("]", ")")
+        safe_model = escape_md(ad["model"])
         if ad["channel"] and ad["message_id"]:
             link = f"https://t.me/{ad['channel'].lstrip('@')}/{ad['message_id']}"
             ads_lines += f"• [{safe_model}]({link})\n"
         else:
             ads_lines += f"• {safe_model}\n"
 
-    username_str = f"@{username}" if username else "нет"
+    username_str = f"@{escape_md(username)}" if username else "нет"
     text = (
-        f"👤 {first_name}\n"
+        f"👤 {escape_md(first_name)}\n"
         f"Профиль в JustTrade создан {first_seen}\n"
         f"Объявления: {active} актуально\n"
         f"Продано: {sold}\n"
