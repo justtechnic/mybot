@@ -1,14 +1,15 @@
 import os
 import asyncio
 import aiosqlite
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardMarkup, KeyboardButton
+    ReplyKeyboardMarkup, KeyboardButton,
+    InputMediaPhoto
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -126,11 +127,6 @@ def delivery_kb():
         [InlineKeyboardButton(text="✅ Отправлю", callback_data="del_yes")],
         [InlineKeyboardButton(text="❌ Не отправлю", callback_data="del_no")],
         [InlineKeyboardButton(text="↩️ Назад", callback_data="back_to_city")],
-        [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
-    ])
-
-def back_menu_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
     ])
 
@@ -458,9 +454,17 @@ async def photos_done(callback: types.CallbackQuery, state: FSMContext):
         [InlineKeyboardButton(text="✒️ Сбросить объявление", callback_data="reset_ad")],
         [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
     ])
-    await callback.message.answer_photo(photo=photos[0], caption=preview_text, reply_markup=preview_kb)
-    for ph in photos[1:]:
-        await callback.message.answer_photo(photo=ph)
+    if len(photos) == 1:
+        await callback.message.answer_photo(photo=photos[0], caption=preview_text, reply_markup=preview_kb)
+    else:
+        media = []
+        for i, ph in enumerate(photos):
+            if i == 0:
+                media.append(InputMediaPhoto(media=ph, caption=preview_text))
+            else:
+                media.append(InputMediaPhoto(media=ph))
+        await callback.message.answer_media_group(media=media)
+        await callback.message.answer("Выберите действие:", reply_markup=preview_kb)
     await callback.answer()
 
 @dp.callback_query(F.data == "back_to_photos", AdForm.preview)
@@ -509,9 +513,17 @@ async def send_moderation(callback: types.CallbackQuery, state: FSMContext):
     ])
     photos = data.get('photos', [])
     if photos:
-        await bot.send_photo(chat_id=ADMIN_ID, photo=photos[0], caption=admin_text, reply_markup=admin_kb)
-        for ph in photos[1:]:
-            await bot.send_photo(chat_id=ADMIN_ID, photo=ph)
+        if len(photos) == 1:
+            await bot.send_photo(chat_id=ADMIN_ID, photo=photos[0], caption=admin_text, reply_markup=admin_kb)
+        else:
+            media = []
+            for i, ph in enumerate(photos):
+                if i == 0:
+                    media.append(InputMediaPhoto(media=ph, caption=admin_text))
+                else:
+                    media.append(InputMediaPhoto(media=ph))
+            await bot.send_media_group(chat_id=ADMIN_ID, media=media)
+            await bot.send_message(chat_id=ADMIN_ID, text="Выберите действие:", reply_markup=admin_kb)
     else:
         await bot.send_message(chat_id=ADMIN_ID, text=admin_text, reply_markup=admin_kb)
     await state.clear()
@@ -530,6 +542,11 @@ async def approve_ad(callback: types.CallbackQuery):
         if not row:
             await callback.answer("Объявление не найдено", show_alert=True)
             return
+        try:
+            author = await bot.get_chat(row['user_id'])
+            author_tag = f"@{author.username}" if author.username else author.first_name
+        except Exception:
+            author_tag = str(row['user_id'])
         post_text = (
             f"✅АКТУАЛЬНО✅\n"
             f"#{row['category']}\n"
@@ -542,15 +559,23 @@ async def approve_ad(callback: types.CallbackQuery):
             f"🇷🇺{row['city']}\n"
             f"💸{row['price']}\n"
             f"🚛{row['delivery']}\n\n"
-            f"🥷🏻{row['user_id']}"
+            f"🥷🏻{author_tag}"
         )
         photos = row['photos'].split(",") if row['photos'] else []
         for channel in CHANNELS:
             try:
                 if photos:
-                    sent = await bot.send_photo(chat_id=channel, photo=photos[0], caption=post_text)
-                    for ph in photos[1:]:
-                        await bot.send_photo(chat_id=channel, photo=ph)
+                    if len(photos) == 1:
+                        sent = await bot.send_photo(chat_id=channel, photo=photos[0], caption=post_text)
+                    else:
+                        media = []
+                        for i, ph in enumerate(photos):
+                            if i == 0:
+                                media.append(InputMediaPhoto(media=ph, caption=post_text))
+                            else:
+                                media.append(InputMediaPhoto(media=ph))
+                        sent_msgs = await bot.send_media_group(chat_id=channel, media=media)
+                        sent = sent_msgs[0]
                 else:
                     sent = await bot.send_message(chat_id=channel, text=post_text)
                 await db.execute(
