@@ -760,14 +760,20 @@ async def cb_remove_ad(callback: types.CallbackQuery):
         await db.execute("UPDATE listings SET status = 'SOLD' WHERE id = ?", (lot_id,))
         await db.commit()
 
+    new_caption = f"**ПРОДАНО**\n\n{ad['description']}"
     try:
         await bot.edit_message_caption(
             chat_id=ad["channel"], message_id=ad["message_id"],
-            caption=f"**ПРОДАНО**\n\n{ad['description']}",
-            parse_mode="Markdown"
+            caption=new_caption, parse_mode="Markdown"
         )
     except Exception:
-        pass
+        try:
+            await bot.edit_message_text(
+                chat_id=ad["channel"], message_id=ad["message_id"],
+                text=new_caption, parse_mode="Markdown"
+            )
+        except Exception as e:
+            print(f"Не удалось отредактировать пост #{lot_id}: {e}")
 
     await callback.message.edit_text("Объявление снято с продажи.")
     await callback.answer()
