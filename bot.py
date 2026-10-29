@@ -64,6 +64,12 @@ async def init_db():
             await db.execute("ALTER TABLE listings ADD COLUMN message_ids TEXT")
         except Exception:
             pass
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                first_seen TIMESTAMP
+            )
+        """)
         await db.commit()
 
 async def save_listing(user_id, data, status='PENDING_MODERATION', is_trial=False):
@@ -144,6 +150,12 @@ def step_kb(back_callback: str):
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO users (user_id, first_seen) VALUES (?, ?)",
+            (message.from_user.id, datetime.now())
+        )
+        await db.commit()
     await message.answer("Добро пожаловать в JustTrade!", reply_markup=bottom_menu())
     await show_main_menu(message)
 
@@ -798,6 +810,75 @@ async def cb_remove_ad(callback: types.CallbackQuery):
 
     await callback.message.edit_text("Объявление снято с продажи.")
     await callback.answer()
+
+async def build_profile_text(user_id: int, first_name: str, username: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT first_seen FROM users WHERE user_id = ?", (user_id,)) as cur:
+            u = await cur.fetchone()
+        first_seen = u["first_seen"][:10] if u and u["first_seen"] else "—"
+
+        async with db.execute(
+            "SELECT COUNT(*) FROM listings WHERE user_id = ? AND status = 'ACTIVE'", (user_id,)
+        ) as cur:
+            active = (await cur.fetchone())[0]
+        async with db.execute(
+            "SELECT COUNT(*) FROM listings WHERE user_id = ? AND status = 'SOLD'", (user_id,)
+        ) as cur:
+            sold = (await cur.fetchone())[0]
+        async with db.execute(
+            "SELECT model, channel, message_id FROM listings WHERE user_id = ? AND status = 'ACTIVE'",
+            (user_id,)
+        ) as cur:
+            ads = await cur.fetchall()
+
+    ads_lines = ""
+    for ad in ads:
+        if ad["channel"] and ad["message_id"]:
+            link = f"https://t.me/{ad['channel'].lstrip('@')}/{ad['message_id']}"
+            ads_lines += f"• [{ad['model']}]({link})\n"
+        else:
+            ads_lines += f"• {ad['model']}\n"
+
+    username_str = f"@{username}" if username else "нет"
+    text = (
+        f"👤 {first_name}\n"
+        f"Профиль в JustTrade создан {first_seen}\n"
+        f"Объявления: {active} актуально\n"
+        f"Продано: {sold}\n"
+        f"Телеграмм: {username_str}\n\n"
+        f"Сейчас в канале:\n{ads_lines or 'нет активных объявлений'}"
+    )
+    return text
+
+@dp.callback_query(F.data == "profile")
+async def cb_profile(callback: types.CallbackQuery):
+    text = await build_profile_text(
+        callback.from_user.id,
+        callback.from_user.first_name,
+        callback.from_user.username
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Опубликовать", callback_data="publish")],
+        [InlineKeyboardButton(text="📚 Мои лоты", callback_data="my_ads")],
+        [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
+    ])
+    await callback.message.answer(text, reply_markup=kb, parse_mode="Markdown", disable_web_page_preview=True)
+    await callback.answer()
+
+@dp.message(F.text == "🥷🏻 Профиль")
+async def profile_message(message: types.Message):
+    text = await build_profile_text(
+        message.from_user.id,
+        message.from_user.first_name,
+        message.from_user.username
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Опубликовать", callback_data="publish")],
+        [InlineKeyboardButton(text="📚 Мои лоты", callback_data="my_ads")],
+        [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
+    ])
+    await message.answer(text, reply_markup=kb, parse_mode="Markdown", disable_web_page_preview=True)
 
 @dp.callback_query(F.data == "help")
 async def cb_help(callback: types.CallbackQuery):
