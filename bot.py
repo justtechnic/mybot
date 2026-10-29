@@ -834,11 +834,12 @@ async def build_profile_text(user_id: int, first_name: str, username: str):
 
     ads_lines = ""
     for ad in ads:
+        safe_model = ad["model"].replace("[", "(").replace("]", ")")
         if ad["channel"] and ad["message_id"]:
             link = f"https://t.me/{ad['channel'].lstrip('@')}/{ad['message_id']}"
-            ads_lines += f"• [{ad['model']}]({link})\n"
+            ads_lines += f"• [{safe_model}]({link})\n"
         else:
-            ads_lines += f"• {ad['model']}\n"
+            ads_lines += f"• {safe_model}\n"
 
     username_str = f"@{username}" if username else "нет"
     text = (
