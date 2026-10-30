@@ -705,13 +705,6 @@ async def approve_ad(callback: types.CallbackQuery):
         try:
             await callback.message.edit_text("Объявление одобрено и опубликовано.")
         except Exception:
-            await
-                try:
-        await callback.message.edit_caption(caption="Объявление одобрено и опубликовано.")
-    except Exception:
-        try:
-            await callback.message.edit_text("Объявление одобрено и опубликовано.")
-        except Exception:
             await callback.message.answer("Объявление одобрено и опубликовано.")
     await callback.answer()
 
