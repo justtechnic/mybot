@@ -162,18 +162,23 @@ def step_kb(back_callback: str):
 def escape_html(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-def build_post_text(ad, status="АКТУАЛЬНО", author_tag=None):
+def make_author_tag(username: str, first_name: str, user_id: int) -> str:
+    if username:
+        return f'<a href="https://t.me/{username}">@{username}</a>'
+    return f'<a href="tg://user?id={user_id}">{escape_html(first_name or "Продавец")}</a>'
+
+def build_post_text(ad, status="АКТУАЛЬНО", author_tag=None, author_id=None):
     if status == "ПРОДАНО":
         header = "❌ПРОДАНО❌"
     else:
         header = "✅АКТУАЛЬНО✅"
 
-    tag = author_tag
-    if not tag:
-        try:
-            tag = ad["author_tag"]
-        except (KeyError, IndexError):
-            tag = ad["user_id"]
+    if author_tag:
+        tag = author_tag
+    elif author_id:
+        tag = f'<a href="tg://user?id={author_id}">Продавец</a>'
+    else:
+        tag = str(ad["user_id"])
 
     safe_model = escape_html(ad["model"])
     safe_category = escape_html(ad["category"])
@@ -653,10 +658,10 @@ async def approve_ad(callback: types.CallbackQuery):
             return
         try:
             author = await bot.get_chat(row['user_id'])
-            author_tag = f"@{author.username}" if author.username else author.first_name
+            author_tag = make_author_tag(author.username, author.first_name, row['user_id'])
         except Exception:
-            author_tag = str(row['user_id'])
-        post_text = build_post_text(row, status="АКТУАЛЬНО", author_tag=author_tag)
+            author_tag = f'<a href="tg://user?id={row["user_id"]}">Продавец</a>'
+        post_text = build_post_text(row, status="АКТУАЛЬНО", author_tag=author_tag, author_id=row['user_id'])
         photos = row['photos'].split(",") if row['photos'] else []
         saved_pairs = []
         first_channel = ""
@@ -692,7 +697,7 @@ async def approve_ad(callback: types.CallbackQuery):
         await bot.send_message(
             row['user_id'],
             "Ваша публикация одобрена!👍",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🥷🏻 Мой профиль", callback_data="profile")],
                 [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
             ])
@@ -852,10 +857,10 @@ async def cb_remove_ad(callback: types.CallbackQuery):
 
     try:
         author = await bot.get_chat(ad['user_id'])
-        tag = f"@{author.username}" if author.username else author.first_name
+        tag = make_author_tag(author.username, author.first_name, ad['user_id'])
     except Exception:
-        tag = str(ad['user_id'])
-    new_caption = build_post_text(ad, status="ПРОДАНО", author_tag=tag)
+        tag = f'<a href="tg://user?id={ad["user_id"]}">Продавец</a>'
+    new_caption = build_post_text(ad, status="ПРОДАНО", author_tag=tag, author_id=ad['user_id'])
 
     pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
     if not pairs and ad["channel"] and ad["message_id"]:
@@ -1059,10 +1064,10 @@ async def expire_loop():
 
                     try:
                         author = await bot.get_chat(ad['user_id'])
-                        tag = f"@{author.username}" if author.username else author.first_name
+                        tag = make_author_tag(author.username, author.first_name, ad['user_id'])
                     except Exception:
-                        tag = str(ad['user_id'])
-                    new_caption = build_post_text(ad, status="ПРОДАНО", author_tag=tag)
+                        tag = f'<a href="tg://user?id={ad["user_id"]}">Продавец</a>'
+                    new_caption = build_post_text(ad, status="ПРОДАНО", author_tag=tag, author_id=ad['user_id'])
 
                     pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
                     if not pairs and ad["channel"] and ad["message_id"]:
@@ -1129,10 +1134,10 @@ async def renew_cb(callback: types.CallbackQuery):
 
     try:
         author = await bot.get_chat(ad['user_id'])
-        tag = f"@{author.username}" if author.username else author.first_name
+        tag = make_author_tag(author.username, author.first_name, ad['user_id'])
     except Exception:
-        tag = str(ad['user_id'])
-    new_caption = build_post_text(ad, status="АКТУАЛЬНО", author_tag=tag)
+        tag = f'<a href="tg://user?id={ad["user_id"]}">Продавец</a>'
+    new_caption = build_post_text(ad, status="АКТУАЛЬНО", author_tag=tag, author_id=ad['user_id'])
 
     pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
     if not pairs and ad["channel"] and ad["message_id"]:
