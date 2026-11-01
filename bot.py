@@ -1412,3 +1412,59 @@ async def on_successful_payment(message: Message, state: FSMContext):
                     print(f"Не удалось отредактировать {ch}/{mid}: {e}")
         await message.answer("✅ Оплата получена! Публикация продлена на 7 дней.")
         await state.clear()
+        return
+
+    await state.update_data(is_trial=False, paid=True, charge_id=charge_id)
+    await message.answer(
+        "✅ Оплата получена!\n\n"
+        "Нужно выбрать, что ты хочешь сделать с товаром.\n"
+        "Далее - по пунктам: тип товара, описание, цена, город, доставка, фото товара "
+        "(при покупке можно без фото).\n\n"
+        "Отмена любых действий: /cancel",
+        reply_markup=ad_type_kb()
+    )
+
+async def on_startup(bot: Bot):
+    await init_db()
+    base_url = os.getenv("RENDER_EXTERNAL_URL")
+    if base_url:
+        await bot.set_webhook(
+            f"{base_url}/webhook",
+            secret_token=WEBHOOK_SECRET or None
+        )
+        print(f"Webhook установлен на {base_url}/webhook")
+    else:
+        print("RENDER_EXTERNAL_URL не задан")
+    if DONATEPAY_PAGE_URL:
+        print(f"DonatePay страница: {DONATEPAY_PAGE_URL}")
+
+async def health_check(request):
+    return web.json_response({"status": "ok"})
+
+async def main():
+    app = web.Application()
+    app.router.add_get("/", health_check)
+    webhook_requests_handler = SimpleRequestHandler(
+        dispatcher=dp, bot=bot, secret_token=WEBHOOK_SECRET or None
+    )
+    webhook_requests_handler.register(app, path="/webhook")
+    dp.startup.register(on_startup)
+    setup_application(app, dp, bot=bot)
+    expire_task = asyncio.create_task(expire_loop())
+    port = int(os.getenv("PORT", 8080))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"Сервер запущен на порту {port}")
+    try:
+        await asyncio.Event().wait()
+    finally:
+        expire_task.cancel()
+        try:
+            await expire_task
+        except asyncio.CancelledError:
+            pass
+
+if __name__ == "__main__":
+    asyncio.run(main())
