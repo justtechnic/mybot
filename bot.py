@@ -1,273 +1,3 @@
-import os
-import sqlite3
-import asyncio
-import aiosqlite
-from datetime import datetime, timedelta
-
-from aiohttp import web
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
-from aiogram.types import (
-    InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardMarkup, KeyboardButton,
-    InputMediaPhoto
-)
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-
-TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "7614009397"))
-CHANNELS = ["@JustTechnic", "@baraholkamskkupiproday"]
-DB_PATH = "market.db"
-SUPPORT_CONTACT = "@justtechnic1"
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
-
-bot = Bot(token=TOKEN)
-dp = Dispatcher()
-
-class AdForm(StatesGroup):
-    choosing_type = State()
-    choosing_category = State()
-    entering_model = State()
-    entering_memory = State()
-    entering_description = State()
-    entering_price = State()
-    entering_city = State()
-    choosing_delivery = State()
-    uploading_photos = State()
-    preview = State()
-
-async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS listings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                ad_type TEXT,
-                category TEXT,
-                model TEXT,
-                memory TEXT,
-                description TEXT,
-                price TEXT,
-                city TEXT,
-                delivery TEXT,
-                photos TEXT,
-                status TEXT DEFAULT 'DRAFT',
-                created_at TIMESTAMP,
-                expires_at TIMESTAMP,
-                is_trial BOOLEAN DEFAULT 0,
-                channel TEXT,
-                message_id INTEGER,
-                message_ids TEXT
-            )
-        """)
-        try:
-            await db.execute("ALTER TABLE listings ADD COLUMN message_ids TEXT")
-        except sqlite3.OperationalError as e:
-            if "duplicate column name" not in str(e).lower():
-                raise
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                first_seen TIMESTAMP
-            )
-        """)
-        await db.commit()
-
-async def save_listing(user_id, data, status='PENDING_MODERATION', is_trial=False):
-    async with aiosqlite.connect(DB_PATH) as db:
-        duration = timedelta(hours=24) if is_trial else timedelta(days=7)
-        now = datetime.now()
-        expires = (now + duration).isoformat()
-        cursor = await db.execute("""
-            INSERT INTO listings (
-                user_id, ad_type, category, model, memory, description,
-                price, city, delivery, photos, status, created_at,
-                expires_at, is_trial
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            user_id, data.get('ad_type'), data.get('category'), data.get('model'),
-            data.get('memory'), data.get('description'), data.get('price'),
-            data.get('city'), data.get('delivery'),
-            ",".join(data.get('photos') or []),
-            status, now.isoformat(), expires, 1 if is_trial else 0
-        ))
-        await db.commit()
-        return cursor.lastrowid
-
-def bottom_menu():
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🏡 Главное меню"), KeyboardButton(text="🥷🏻 Профиль")],
-            [KeyboardButton(text="📚 Мои лоты")]
-        ],
-        resize_keyboard=True,
-        is_persistent=True
-    )
-
-def main_menu_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Опубликовать", callback_data="publish")],
-        [InlineKeyboardButton(text="📚 Мои товары", callback_data="my_ads")],
-        [InlineKeyboardButton(text="🥷🏻 Профиль", callback_data="profile")],
-        [InlineKeyboardButton(text="❓ Помощь", callback_data="help")],
-        [InlineKeyboardButton(text="📣 Канал", url="https://t.me/JustTechnic")]
-    ])
-
-def publish_type_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🌱 Бесплатно", callback_data="pub_free")],
-        [InlineKeyboardButton(text="💳 Платно", callback_data="pub_paid")],
-        [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
-    ])
-
-def ad_type_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💵 Продажа", callback_data="adtype_sell")],
-        [InlineKeyboardButton(text="🕵🏻 Покупка", callback_data="adtype_buy")],
-        [InlineKeyboardButton(text="🔁 Обмен", callback_data="adtype_exchange")],
-        [InlineKeyboardButton(text="↩️ Назад", callback_data="pub_free")],
-        [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
-    ])
-
-def category_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 Телефон", callback_data="cat_phone")],
-        [InlineKeyboardButton(text="📲 Планшет", callback_data="cat_tablet")],
-        [InlineKeyboardButton(text="💻 Ноутбук", callback_data="cat_laptop")],
-        [InlineKeyboardButton(text="🎧 Аудио", callback_data="cat_audio")],
-        [InlineKeyboardButton(text="🧩 Запчасти/лот", callback_data="cat_parts")],
-        [InlineKeyboardButton(text="🔨 Услуги", callback_data="cat_services")],
-        [InlineKeyboardButton(text="🎮 Прочее", callback_data="cat_other")],
-        [InlineKeyboardButton(text="↩️ Назад", callback_data="free_continue")],
-        [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
-    ])
-
-def delivery_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Отправлю", callback_data="del_yes")],
-        [InlineKeyboardButton(text="❌ Не отправлю", callback_data="del_no")],
-        [InlineKeyboardButton(text="↩️ Назад", callback_data="back_to_city")],
-        [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
-    ])
-
-def step_kb(back_callback: str):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="↩️ Назад", callback_data=back_callback)],
-        [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
-    ])
-
-def escape_html(text: str) -> str:
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-def make_author_tag(username: str, first_name: str, user_id: int) -> str:
-    if username:
-        return f'<a href="https://t.me/{username}">@{username}</a>'
-    return f'<a href="tg://user?id={user_id}">{escape_html(first_name or "Продавец")}</a>'
-
-def build_post_text(ad, status="АКТУАЛЬНО", author_tag=None, author_id=None):
-    if status == "ПРОДАНО":
-        header = "❌ПРОДАНО❌"
-    else:
-        header = "✅АКТУАЛЬНО✅"
-
-    if author_tag:
-        tag = author_tag
-    elif author_id:
-        tag = f'<a href="tg://user?id={author_id}">Продавец</a>'
-    else:
-        tag = str(ad["user_id"])
-
-    safe_model = escape_html(ad["model"])
-    safe_category = escape_html(ad["category"])
-    safe_city = escape_html(ad["city"])
-    safe_desc = escape_html(ad["description"])
-    safe_price = escape_html(ad["price"])
-    safe_delivery = escape_html(ad["delivery"])
-    safe_memory = escape_html(ad["memory"]) if ad["memory"] and ad["memory"] != "—" else None
-
-    text = f"{header}\n#{safe_category}\n#{safe_city}\n\n"
-    text += f"📦 {safe_model}\n\n"
-    if safe_memory:
-        text += f"💾Память: {safe_memory}\n\n"
-    text += (
-        f"{safe_desc}\n\n"
-        f"🇷🇺{safe_city}\n"
-        f"💸{safe_price}\n"
-        f"🚛{safe_delivery}\n\n"
-        f"🥷🏻{tag}"
-    )
-    return text
-
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT OR IGNORE INTO users (user_id, first_seen) VALUES (?, ?)",
-            (message.from_user.id, datetime.now().isoformat())
-        )
-        await db.commit()
-    await message.answer("Добро пожаловать в JustTrade!", reply_markup=bottom_menu())
-    await show_main_menu(message)
-
-async def show_main_menu(message: types.Message, user_id: int = None):
-    uid = user_id or message.from_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT COUNT(*) FROM listings WHERE user_id = ? AND status = 'ACTIVE'",
-            (uid,)
-        ) as cur:
-            count = (await cur.fetchone())[0]
-    text = (
-        f"Добрый день, {message.from_user.first_name}!\n\n"
-        f"JustTrade - не просто бот, а лучший помощник в продаже техники;)\n\n"
-        f"Ваши объявления: {count}"
-    )
-    await message.answer(text, reply_markup=main_menu_kb())
-
-@dp.message(F.text == "🏡 Главное меню")
-async def go_main(message: types.Message):
-    await show_main_menu(message)
-
-@dp.callback_query(F.data == "main_menu")
-async def cb_main(callback: types.CallbackQuery):
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
-    await show_main_menu(callback.message, user_id=callback.from_user.id)
-    await callback.answer()
-
-@dp.callback_query(F.data == "publish")
-async def cb_publish(callback: types.CallbackQuery):
-    await callback.message.edit_text("Выберите способ публикации", reply_markup=publish_type_kb())
-    await callback.answer()
-
-@dp.callback_query(F.data == "pub_free")
-async def cb_pub_free(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_text(
-        "Отлично! Ваше объявление будет выставлено бесплатно на 24 часа, после чего оно будет автоматически снято с продажи. Если вы захотите продлить срок публикации, то это будет стоить 25 руб или 25 звезд на 7 дней.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Продолжить", callback_data="free_continue")],
-            [InlineKeyboardButton(text="↩️ Назад", callback_data="publish")],
-            [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
-        ])
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data == "free_continue")
-async def cb_free_continue(callback: types.CallbackQuery, state: FSMContext):
-    await state.update_data(is_trial=True)
-    await callback.message.edit_text(
-        "Нужно выбрать, что ты хочешь сделать с товаром.\n"
-        "Далее - по пунктам: тип товара, описание, цена, город, доставка, фото товара (при покупке можно без фото).\n\n"
-        "Отмена любых действий: /cancel",
-        reply_markup=ad_type_kb()
-    )
-    await callback.answer()
-
 @dp.callback_query(F.data.startswith("adtype_"))
 async def cb_adtype(callback: types.CallbackQuery, state: FSMContext):
     ad_type = callback.data.split("_")[1]
@@ -697,7 +427,7 @@ async def approve_ad(callback: types.CallbackQuery):
         await bot.send_message(
             row['user_id'],
             "Ваша публикация одобрена!👍",
-                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🥷🏻 Мой профиль", callback_data="profile")],
                 [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
             ])
@@ -721,13 +451,21 @@ async def reject_ad(callback: types.CallbackQuery):
     lot_id = int(callback.data.split("_")[1])
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT user_id FROM listings WHERE id = ?", (lot_id,)) as cur:
+        async with db.execute("SELECT user_id, charge_id FROM listings WHERE id = ?", (lot_id,)) as cur:
             row = await cur.fetchone()
         if not row:
             await callback.answer("Объявление не найдено", show_alert=True)
             return
         await db.execute("UPDATE listings SET status = 'REJECTED' WHERE id = ?", (lot_id,))
         await db.commit()
+    if row['charge_id']:
+        try:
+            await bot.refund_star_payment(
+                user_id=row['user_id'],
+                telegram_payment_charge_id=row['charge_id']
+            )
+        except Exception as e:
+            print(f"Не удалось вернуть звёзды {row['user_id']}: {e}")
     try:
         await bot.send_message(
             row['user_id'],
@@ -1110,62 +848,99 @@ async def expire_loop():
         raise
 
 @dp.callback_query(F.data.startswith("renew_"))
-async def renew_cb(callback: types.CallbackQuery):
+async def renew_cb(callback: types.CallbackQuery, state: FSMContext):
     lot_id = int(callback.data.split("_")[1])
-    user_id = callback.from_user.id
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM listings WHERE id = ? AND user_id = ?",
-            (lot_id, user_id)
+            (lot_id, callback.from_user.id)
         ) as cur:
             ad = await cur.fetchone()
     if not ad:
         await callback.answer("Объявление не найдено.", show_alert=True)
         return
-
-    new_expires = (datetime.now() + timedelta(days=7)).isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE listings SET status = 'ACTIVE', expires_at = ? WHERE id = ?",
-            (new_expires, lot_id)
-        )
-        await db.commit()
-
-    try:
-        author = await bot.get_chat(ad['user_id'])
-        tag = make_author_tag(author.username, author.first_name, ad['user_id'])
-    except Exception:
-        tag = f'<a href="tg://user?id={ad["user_id"]}">Продавец</a>'
-    new_caption = build_post_text(ad, status="АКТУАЛЬНО", author_tag=tag, author_id=ad['user_id'])
-
-    pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
-    if not pairs and ad["channel"] and ad["message_id"]:
-        pairs = [f"{ad['channel']}:{ad['message_id']}"]
-    for pair in pairs:
-        pair = pair.strip()
-        if ":" not in pair:
-            continue
-        ch, mid = pair.rsplit(":", 1)
-        try:
-            await bot.edit_message_caption(
-                chat_id=ch, message_id=int(mid),
-                caption=new_caption, parse_mode="HTML"
-            )
-        except Exception:
-            try:
-                await bot.edit_message_text(
-                    chat_id=ch, message_id=int(mid),
-                    text=new_caption, parse_mode="HTML"
-                )
-            except Exception as e:
-                print(f"Не удалось отредактировать {ch}/{mid}: {e}")
-
-    try:
-        await callback.message.edit_text("Публикация продлена на 7 дней.")
-    except Exception:
-        await callback.message.answer("Публикация продлена на 7 дней.")
+    await state.update_data(paid_context="renew", renew_lot_id=lot_id)
+    await callback.message.edit_text(
+        "Отлично! Ваше объявление будет выставлено на 7 дней с публикацией "
+        "в истории у Владельца, после окончания срока объявление будет снято "
+        "с продажи, но его можно будет продлить, если потребуется.\n\n"
+        "Выберите способ оплаты:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="25⭐️", callback_data="pay_stars")],
+            [InlineKeyboardButton(text="25💸", callback_data="pay_donatepay")],
+            [InlineKeyboardButton(text="↩️ Назад", callback_data="main_menu")]
+        ])
+    )
     await callback.answer()
+
+@dp.pre_checkout_query()
+async def pre_checkout(query: PreCheckoutQuery):
+    await query.answer(ok=True)
+
+@dp.message(F.successful_payment)
+async def on_successful_payment(message: Message, state: FSMContext):
+    payment = message.successful_payment
+    payload = payment.invoice_payload
+    charge_id = payment.telegram_payment_charge_id
+    user_id = message.from_user.id
+
+    if payload.startswith("renew_"):
+        parts = payload.split("_")
+        lot_id = int(parts[1])
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM listings WHERE id = ?", (lot_id,)) as cur:
+                ad = await cur.fetchone()
+            if not ad:
+                await message.answer("Объявление не найдено, но оплата получена. Напишите в поддержку.")
+                return
+            new_expires = (datetime.now() + timedelta(days=7)).isoformat()
+            await db.execute(
+                "UPDATE listings SET status = 'ACTIVE', expires_at = ?, charge_id = ? WHERE id = ?",
+                (new_expires, charge_id, lot_id)
+            )
+            await db.commit()
+        try:
+            author = await bot.get_chat(user_id)
+            tag = make_author_tag(author.username, author.first_name, user_id)
+        except Exception:
+            tag = f'<a href="tg://user?id={user_id}">Продавец</a>'
+        new_caption = build_post_text(ad, status="АКТУАЛЬНО", author_tag=tag, author_id=user_id)
+        pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
+        if not pairs and ad["channel"] and ad["message_id"]:
+            pairs = [f"{ad['channel']}:{ad['message_id']}"]
+        for pair in pairs:
+            pair = pair.strip()
+            if ":" not in pair:
+                continue
+            ch, mid = pair.rsplit(":", 1)
+            try:
+                await bot.edit_message_caption(
+                    chat_id=ch, message_id=int(mid),
+                    caption=new_caption, parse_mode="HTML"
+                )
+            except Exception:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=ch, message_id=int(mid),
+                        text=new_caption, parse_mode="HTML"
+                    )
+                except Exception as e:
+                    print(f"Не удалось отредактировать {ch}/{mid}: {e}")
+        await message.answer("✅ Оплата получена! Публикация продлена на 7 дней.")
+        await state.clear()
+        return
+
+    await state.update_data(is_trial=False, paid=True, charge_id=charge_id)
+    await message.answer(
+        "✅ Оплата получена!\n\n"
+        "Нужно выбрать, что ты хочешь сделать с товаром.\n"
+        "Далее - по пунктам: тип товара, описание, цена, город, доставка, фото товара "
+        "(при покупке можно без фото).\n\n"
+        "Отмена любых действий: /cancel",
+        reply_markup=ad_type_kb()
+    )
 
 async def on_startup(bot: Bot):
     base_url = os.getenv("RENDER_EXTERNAL_URL")
@@ -1177,6 +952,10 @@ async def on_startup(bot: Bot):
         print(f"Webhook установлен на {base_url}/webhook")
     else:
         print("RENDER_EXTERNAL_URL не задан")
+    if DONATEPAY_PAGE_URL:
+        print(f"DonatePay страница: {DONATEPAY_PAGE_URL}")
+    else:
+        print("DonatePay страница не задана")
 
 async def health_check(request):
     return web.json_response({"status": "ok"})
@@ -1208,4 +987,4 @@ async def main():
             pass
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main())      
