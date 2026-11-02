@@ -1328,6 +1328,21 @@ async def expire_loop():
     except asyncio.CancelledError:
         print("expire_loop остановлен")
         raise
+async def backup_loop():
+    while True:
+        try:
+            if os.path.exists(DB_PATH):
+                await bot.send_document(
+                    chat_id=ADMIN_ID,
+                    document=types.FSInputFile(DB_PATH),
+                    caption=f"Бэкап базы за {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                )
+                print(f"Бэкап отправлен в {datetime.now()}")
+            else:
+                print(f"Файл {DB_PATH} не найден, бэкап пропущен")
+        except Exception as e:
+            print(f"Ошибка бэкапа: {e}")
+        await asyncio.sleep(3600)
 
 @dp.callback_query(F.data.startswith("renew_"))
 async def renew_cb(callback: types.CallbackQuery, state: FSMContext):
@@ -1451,6 +1466,7 @@ async def main():
     dp.startup.register(on_startup)
     setup_application(app, dp, bot=bot)
     expire_task = asyncio.create_task(expire_loop())
+    backup_task = asyncio.create_task(backup_loop())
     port = int(os.getenv("PORT", 8080))
     runner = web.AppRunner(app)
     await runner.setup()
@@ -1461,8 +1477,13 @@ async def main():
         await asyncio.Event().wait()
     finally:
         expire_task.cancel()
+        backup_task.cancel()
         try:
             await expire_task
+        except asyncio.CancelledError:
+            pass
+        try:
+            await backup_task
         except asyncio.CancelledError:
             pass
 
