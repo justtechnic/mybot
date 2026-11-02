@@ -16,7 +16,8 @@ from aiogram.types import (
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application, ip_filter_middleware
+from aiogram.webhook.security import IPFilter
 
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "7614009397"))
@@ -1442,9 +1443,8 @@ async def health_check(request):
     return web.json_response({"status": "ok"})
 
 async def main():
-from aiogram.webhook.aiohttp_server import ip_filter_middleware
-from aiogram.webhook.security import IPFilter
     app = web.Application()
+    app.middlewares.append(ip_filter_middleware(IPFilter.default()))
     app.router.add_get("/", health_check)
     webhook_requests_handler = SimpleRequestHandler(
         dispatcher=dp, bot=bot, secret_token=WEBHOOK_SECRET or None
