@@ -1442,6 +1442,8 @@ async def health_check(request):
     return web.json_response({"status": "ok"})
 
 async def main():
+from aiogram.webhook.aiohttp_server import ip_filter_middleware
+from aiogram.webhook.security import IPFilter
     app = web.Application()
     app.router.add_get("/", health_check)
     webhook_requests_handler = SimpleRequestHandler(
