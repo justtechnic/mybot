@@ -66,6 +66,7 @@ class AdForm(StatesGroup):
     choosing_delivery = State()
     uploading_photos = State()
     preview = State()
+    waiting_for_restore_db = State()  
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -1304,32 +1305,31 @@ async def cb_help_reject(callback: types.CallbackQuery):
     ])
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
+
 @dp.message(Command("restore"))
-async def restore_db(message: types.Message):
+async def restore_db(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
         return
-    
-    if not message.document:
-        await message.answer(
-            "📁 Пришлите файл `market.db` (базу данных) как документ.\n\n"
-            "⚠️ Внимание: восстановление временное. После перезапуска Render данные исчезнут.",
-            parse_mode="Markdown"
-        )
+    await state.set_state(AdForm.waiting_for_restore_db)
+    await message.answer(
+        "📁 Пришлите файл `market.db` (базу данных) как документ.\n\n"
+        "⚠️ Внимание: восстановление временное. После перезапуска Render данные исчезнут.",
+        parse_mode="Markdown"
+    )
+@dp.message(AdForm.waiting_for_restore_db, F.document)
+async def process_restore_file(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        await state.clear()
         return
-    
     if not message.document.file_name.endswith(".db"):
         await message.answer("❌ Нужен файл с расширением `.db` (например, `market.db`).")
         return
-    
     try:
         file = await bot.get_file(message.document.file_id)
         await bot.download_file(file.file_path, DB_PATH)
-        
-        # Проверяем, что база читается
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute("SELECT COUNT(*) FROM listings") as cur:
                 count = (await cur.fetchone())[0]
-        
         await message.answer(
             f"✅ База данных восстановлена!\n"
             f"📊 Объявлений в базе: {count}\n\n"
@@ -1337,7 +1337,8 @@ async def restore_db(message: types.Message):
         )
     except Exception as e:
         await message.answer(f"❌ Ошибка восстановления: {e}")
-
+    finally:
+        await state.clear()
 async def expire_loop():
     try:
         while True:
