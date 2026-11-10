@@ -847,6 +847,10 @@ async def back_to_photos(callback: types.CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data == "send_moderation", AdForm.preview)
 async def send_moderation(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
+    if data.get("moderation_sent"):
+        await callback.answer("Объявление уже отправлено на модерацию.", show_alert=True)
+        return
+    await state.update_data(moderation_sent=True)
     user_id = callback.from_user.id
     is_trial = data.get('is_trial', True)
     lot_id = await save_listing(user_id, data, status='PENDING_MODERATION', is_trial=is_trial)
