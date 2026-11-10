@@ -987,14 +987,40 @@ async def reject_ad(callback: types.CallbackQuery):
             return
         await db.execute("UPDATE listings SET status = 'REJECTED' WHERE id = ?", (lot_id,))
         await db.commit()
+
+    # Возврат звёзд, если было оплачено Stars
     if row['charge_id']:
         try:
             await bot.refund_star_payment(
                 user_id=row['user_id'],
                 telegram_payment_charge_id=row['charge_id']
             )
+            try:
+                await bot.send_message(
+                    ADMIN_ID,
+                    f"↩️ <b>Возврат Stars</b>\n\n"
+                    f"Пользователь: <code>{row['user_id']}</code>\n"
+                    f"Объявление #{lot_id} отклонено, звёзды возвращены.\n"
+                    f"Charge ID: <code>{row['charge_id']}</code>",
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                print(f"Не удалось уведомить админа о возврате: {e}")
         except Exception as e:
             print(f"Не удалось вернуть звёзды {row['user_id']}: {e}")
+            try:
+                await bot.send_message(
+                    ADMIN_ID,
+                    f"⚠️ <b>Ошибка возврата Stars</b>\n\n"
+                    f"Пользователь: <code>{row['user_id']}</code>\n"
+                    f"Объявление #{lot_id}\n"
+                    f"Charge ID: <code>{row['charge_id']}</code>\n"
+                    f"Ошибка: {e}",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+
     try:
         await bot.send_message(
             row['user_id'],
@@ -1006,6 +1032,7 @@ async def reject_ad(callback: types.CallbackQuery):
         )
     except Exception:
         pass
+
     try:
         await callback.message.edit_caption(caption="Объявление отклонено.")
     except Exception:
@@ -1013,6 +1040,7 @@ async def reject_ad(callback: types.CallbackQuery):
             await callback.message.edit_text("Объявление отклонено.")
         except Exception:
             await callback.message.answer("Объявление отклонено.")
+
     await callback.answer()
 
 @dp.callback_query(F.data == "reset_ad")
@@ -1506,6 +1534,19 @@ async def on_successful_payment(message: Message, state: FSMContext):
                 except Exception as e:
                     print(f"Не удалось отредактировать {ch}/{mid}: {e}")
         await message.answer("✅ Оплата получена! Публикация продлена на 7 дней.")
+        try:
+            await bot.send_message(
+                ADMIN_ID,
+                f"⭐ <b>Оплата Stars (продление)</b>\n\n"
+                f"Пользователь: {escape_html(message.from_user.first_name)} (@{message.from_user.username or 'нет'})\n"
+                f"ID: <code>{user_id}</code>\n"
+                f"Объявление #{lot_id}: {escape_html(ad['model'])}\n"
+                f"Сумма: 25 ⭐️\n"
+                f"Charge ID: <code>{charge_id}</code>",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            print(f"Не удалось уведомить админа об оплате (продление): {e}")
         await state.clear()
         return
 
@@ -1518,6 +1559,18 @@ async def on_successful_payment(message: Message, state: FSMContext):
         "Отмена любых действий: /cancel",
         reply_markup=ad_type_kb()
     )
+    try:
+        await bot.send_message(
+            ADMIN_ID,
+            f"⭐ <b>Оплата Stars (новое объявление)</b>\n\n"
+            f"Пользователь: {escape_html(message.from_user.first_name)} (@{message.from_user.username or 'нет'})\n"
+            f"ID: <code>{user_id}</code>\n"
+            f"Сумма: 25 ⭐️\n"
+            f"Charge ID: <code>{charge_id}</code>",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        print(f"Не удалось уведомить админа об оплате (новое): {e}")
 
 async def on_startup(bot: Bot):
     await init_db()
