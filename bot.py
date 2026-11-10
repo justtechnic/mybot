@@ -1,4 +1,5 @@
 import os
+import time
 import sqlite3
 import asyncio
 import aiosqlite
@@ -28,6 +29,31 @@ DONATEPAY_PAGE_URL = os.getenv("DONATEPAY_PAGE_URL", "https://new.donatepay.ru/@
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
+
+class AntiSpamMiddleware:
+    def __init__(self, cooldown: float = 2.0):
+        self.cooldown = cooldown
+        self.last_press = {}  # key: (user_id, callback_data) -> timestamp
+
+    async def __call__(self, handler, event, data):
+        # Работаем только с callback_query
+        if isinstance(event, types.CallbackQuery):
+            key = (event.from_user.id, event.data)
+            now = time.time()
+            last = self.last_press.get(key, 0)
+            if now - last < self.cooldown:
+                # Слишком часто — молча игнорируем, чтобы не засорять логи
+                try:
+                    await event.answer()
+                except Exception:
+                    pass
+                return
+            self.last_press[key] = now
+            # Периодически чистим словарь, чтобы не рос бесконечно
+            if len(self.last_press) > 1000:
+                cutoff = now - 60
+                self.last_press = {k: v for k, v in self.last_press.items() if v > cutoff}
+        return await handler(event, data)
 
 class AdForm(StatesGroup):
     choosing_type = State()
@@ -320,7 +346,7 @@ async def cb_pay_stars(callback: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "pay_donatepay")
 async def cb_pay_donatepay(callback: types.CallbackQuery, state: FSMContext):
-    await state.update_data(donatepay_initiated=True)
+    await state.update_data(donatepay_initiated=True, donatepay_pending=False)
     text = (
         "⚠️ Бот не может автоматически проверить пожертвование, поэтому его проверяет "
         "Владелец бота @JustTechnic1. Для публикации объявления потребуется:\n\n"
@@ -343,6 +369,12 @@ async def cb_pay_donatepay(callback: types.CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data == "donatepay_done")
 async def cb_donatepay_done(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
+
+    # Защита от повторных нажатий
+    if data.get("donatepay_pending"):
+        await callback.answer("Заявка уже отправлена, ожидайте проверки.", show_alert=True)
+        return
+
     context = data.get("paid_context", "new")
     renew_lot_id = data.get("renew_lot_id") if context == "renew" else None
 
@@ -368,17 +400,27 @@ async def cb_donatepay_done(callback: types.CallbackQuery, state: FSMContext):
             callback_data=f"dp_reject_{callback.from_user.id}"
         )]
     ])
+
     try:
         await bot.send_message(chat_id=ADMIN_ID, text=text, reply_markup=kb, parse_mode="HTML")
-        await callback.message.edit_text(
-            "✅ Заявка отправлена админу. Как только оплата подтвердится — придёт уведомление.",
-            reply_markup=None
-        )
     except Exception as e:
         print(f"Не удалось отправить заявку админу: {e}")
         await callback.answer("Ошибка, напишите в поддержку.", show_alert=True)
         return
+
+    # Ставим флаг только после успешной отправки
     await state.update_data(donatepay_pending=True)
+
+    try:
+        await callback.message.edit_text(
+            "✅ Заявка отправлена админу. Как только оплата подтвердится — придёт уведомление.",
+            reply_markup=None
+        )
+    except Exception:
+        await callback.message.answer(
+            "✅ Заявка отправлена админу. Как только оплата подтвердится — придёт уведомление."
+        )
+        
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("dp_confirm_"))
@@ -1463,6 +1505,7 @@ async def main():
         dispatcher=dp, bot=bot, secret_token=WEBHOOK_SECRET or None
     )
     webhook_requests_handler.register(app, path="/webhook")
+    dp.callback_query.middleware(AntiSpamMiddleware(cooldown=2.0))
     dp.startup.register(on_startup)
     setup_application(app, dp, bot=bot)
     expire_task = asyncio.create_task(expire_loop())
