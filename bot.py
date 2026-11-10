@@ -13,7 +13,7 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
     ReplyKeyboardMarkup, KeyboardButton,
     InputMediaPhoto,
-    LabeledPrice, PreCheckoutQuery, Message
+    LabeledPrice, PreCheckoutQuery, Message, FSInputFile
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -1304,6 +1304,39 @@ async def cb_help_reject(callback: types.CallbackQuery):
     ])
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
+@dp.message(Command("restore"))
+async def restore_db(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    if not message.document:
+        await message.answer(
+            "📁 Пришлите файл `market.db` (базу данных) как документ.\n\n"
+            "⚠️ Внимание: восстановление временное. После перезапуска Render данные исчезнут.",
+            parse_mode="Markdown"
+        )
+        return
+    
+    if not message.document.file_name.endswith(".db"):
+        await message.answer("❌ Нужен файл с расширением `.db` (например, `market.db`).")
+        return
+    
+    try:
+        file = await bot.get_file(message.document.file_id)
+        await bot.download_file(file.file_path, DB_PATH)
+        
+        # Проверяем, что база читается
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute("SELECT COUNT(*) FROM listings") as cur:
+                count = (await cur.fetchone())[0]
+        
+        await message.answer(
+            f"✅ База данных восстановлена!\n"
+            f"📊 Объявлений в базе: {count}\n\n"
+            f"⚠️ Данные сохранятся только до следующего перезапуска Render."
+        )
+    except Exception as e:
+        await message.answer(f"❌ Ошибка восстановления: {e}")
 
 async def expire_loop():
     try:
