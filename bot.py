@@ -1498,6 +1498,21 @@ async def expire_loop():
         except Exception as e:
             print(f"Ошибка в expire_loop: {e}")
         await asyncio.sleep(60)
+async def backup_loop():
+    while True:
+        try:
+            if os.path.exists(DB_PATH):
+                await bot.send_document(
+                    chat_id=ADMIN_ID,
+                    document=FSInputFile(DB_PATH),
+                    caption=f"Бэкап базы за {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                )
+                print(f"Бэкап отправлен в {datetime.now()}")
+            else:
+                print(f"Файл {DB_PATH} не найден, бэкап пропущен")
+        except Exception as e:
+            print(f"Ошибка бэкапа: {e}")
+        await asyncio.sleep(3600)
 
 @dp.pre_checkout_query()
 async def pre_checkout(query: PreCheckoutQuery):
