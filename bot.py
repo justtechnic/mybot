@@ -138,7 +138,7 @@ async def init_db():
                     print(f"DEBUG: {ddl} -> {e}")
                     raise
 
-        await db.execute("""
+                await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 first_seen TIMESTAMP,
@@ -153,9 +153,6 @@ async def init_db():
                 print("DEBUG: users.verified exists")
             else:
                 print(f"DEBUG: users.verified error: {e}")
-                raise
-        await db.commit()
-        print("DEBUG: init_db finished")
 
 async def save_listing(user_id, data, status='PENDING_MODERATION', is_trial=False):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -1796,6 +1793,10 @@ async def cb_dp_verify_confirm(callback: types.CallbackQuery):
     user_id = int(callback.data.split("_")[3])
 
     async with aiosqlite.connect(DB_PATH) as db:
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN verified INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
         await db.execute("UPDATE users SET verified = 1 WHERE user_id = ?", (user_id,))
         await db.commit()
 
