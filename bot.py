@@ -36,30 +36,47 @@ SUBCATEGORIES = {
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
+
 class AntiSpamMiddleware:
     def __init__(self, cooldown: float = 2.0):
         self.cooldown = cooldown
-        self.last_press = {}  # key: (user_id, callback_data) -> timestamp
+        self.last_press = {}
 
     async def __call__(self, handler, event, data):
-        # Работаем только с callback_query
         if isinstance(event, types.CallbackQuery):
             key = (event.from_user.id, event.data)
             now = time.time()
             last = self.last_press.get(key, 0)
             if now - last < self.cooldown:
-                # Слишком часто — молча игнорируем, чтобы не засорять логи
                 try:
                     await event.answer()
                 except Exception:
                     pass
                 return
             self.last_press[key] = now
-            # Периодически чистим словарь, чтобы не рос бесконечно
             if len(self.last_press) > 1000:
                 cutoff = now - 60
                 self.last_press = {k: v for k, v in self.last_press.items() if v > cutoff}
         return await handler(event, data)
+
+
+class AdminErrorMiddleware:
+    async def __call__(self, handler, event, data):
+        try:
+            return await handler(event, data)
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()[:1500]
+            try:
+                await bot.send_message(
+                    ADMIN_ID,
+                    f"⚠️ <b>Ошибка в боте</b>\n\n<code>{escape_html(str(e))}</code>\n\n<pre>{escape_html(tb)}</pre>",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+            raise
+
 
 class AdForm(StatesGroup):
     choosing_type = State()
@@ -73,7 +90,9 @@ class AdForm(StatesGroup):
     choosing_delivery = State()
     uploading_photos = State()
     preview = State()
-    waiting_for_restore_db = State()  
+    waiting_for_restore_db = State()
+    waiting_for_subscription_keyword = State()
+
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -100,70 +119,47 @@ async def init_db():
                 message_ids TEXT,
                 charge_id TEXT,
                 is_promoted INTEGER DEFAULT 0,
-                promoted_until TIMESTAMP
+                promoted_until TIMESTAMP,
+                seller_verified INTEGER DEFAULT 0
             )
         """)
-        print("DEBUG: table listings created/exists")
-
-        try:
-            await db.execute("ALTER TABLE listings ADD COLUMN message_ids TEXT")
-            print("DEBUG: message_ids added")
-        except sqlite3.OperationalError as e:
-            if "duplicate column name" in str(e).lower():
-                print("DEBUG: message_ids exists")
-            else:
-                print(f"DEBUG: message_ids error: {e}")
-                raise
-
-        try:
-            await db.execute("ALTER TABLE listings ADD COLUMN charge_id TEXT")
-            print("DEBUG: charge_id added")
-        except sqlite3.OperationalError as e:
-            if "duplicate column name" in str(e).lower():
-                print("DEBUG: charge_id exists")
-            else:
-                print(f"DEBUG: charge_id error: {e}")
-                raise
-
-        try:
-            await db.execute("ALTER TABLE listings ADD COLUMN subcategory TEXT")
-            print("DEBUG: subcategory added")
-        except sqlite3.OperationalError as e:
-            if "duplicate column name" in str(e).lower():
-                print("DEBUG: subcategory exists")
-            else:
-                print(f"DEBUG: subcategory error: {e}")
-                raise
-
-        try:
-            await db.execute("ALTER TABLE listings ADD COLUMN is_promoted INTEGER DEFAULT 0")
-            print("DEBUG: is_promoted added")
-        except sqlite3.OperationalError as e:
-            if "duplicate column name" in str(e).lower():
-                print("DEBUG: is_promoted exists")
-            else:
-                print(f"DEBUG: is_promoted error: {e}")
-                raise
-
-        try:
-            await db.execute("ALTER TABLE listings ADD COLUMN promoted_until TIMESTAMP")
-            print("DEBUG: promoted_until added")
-        except sqlite3.OperationalError as e:
-            if "duplicate column name" in str(e).lower():
-                print("DEBUG: promoted_until exists")
-            else:
-                print(f"DEBUG: promoted_until error: {e}")
-                raise
-
+        for ddl in [
+            "ALTER TABLE listings ADD COLUMN message_ids TEXT",
+            "ALTER TABLE listings ADD COLUMN charge_id TEXT",
+            "ALTER TABLE listings ADD COLUMN subcategory TEXT",
+            "ALTER TABLE listings ADD COLUMN is_promoted INTEGER DEFAULT 0",
+            "ALTER TABLE listings ADD COLUMN promoted_until TIMESTAMP",
+            "ALTER TABLE listings ADD COLUMN seller_verified INTEGER DEFAULT 0",
+        ]:
+            try:
+                await db.execute(ddl)
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e).lower():
+                    print(f"DEBUG: {ddl} -> {e}")
+                    raise
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
-                first_seen TIMESTAMP
+                first_seen TIMESTAMP,
+                verified INTEGER DEFAULT 0
             )
         """)
-        print("DEBUG: table users created/exists")
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN verified INTEGER DEFAULT 0")
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" not in str(e).lower():
+                raise
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                keyword TEXT NOT NULL,
+                created_at TIMESTAMP
+            )
+        """)
         await db.commit()
         print("DEBUG: init_db finished")
+
 
 async def save_listing(user_id, data, status='PENDING_MODERATION', is_trial=False):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -188,6 +184,7 @@ async def save_listing(user_id, data, status='PENDING_MODERATION', is_trial=Fals
         await db.commit()
         return cursor.lastrowid
 
+
 def bottom_menu():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -198,14 +195,17 @@ def bottom_menu():
         is_persistent=True
     )
 
+
 def main_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Опубликовать", callback_data="publish")],
         [InlineKeyboardButton(text="📚 Мои товары", callback_data="my_ads")],
+        [InlineKeyboardButton(text="🔔 Подписки", callback_data="subs_menu")],
         [InlineKeyboardButton(text="🥷🏻 Профиль", callback_data="profile")],
         [InlineKeyboardButton(text="❓ Помощь", callback_data="help")],
         [InlineKeyboardButton(text="📣 Канал", url="https://t.me/JustTechnic")]
     ])
+
 
 def publish_type_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -213,6 +213,7 @@ def publish_type_kb():
         [InlineKeyboardButton(text="💳 Платно", callback_data="pub_paid")],
         [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
     ])
+
 
 def ad_type_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -222,6 +223,7 @@ def ad_type_kb():
         [InlineKeyboardButton(text="↩️ Назад", callback_data="pub_free")],
         [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
     ])
+
 
 def category_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -236,11 +238,13 @@ def category_kb():
         [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
     ])
 
-def subcategory_kb(subcats: list):          # <-- вставить здесь
+
+def subcategory_kb(subcats: list):
     kb = [[InlineKeyboardButton(text=name, callback_data=f"subcat_{name}")] for name in subcats]
     kb.append([InlineKeyboardButton(text="↩️ Назад", callback_data="back_to_category")])
     kb.append([InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
+
 
 def delivery_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -250,21 +254,33 @@ def delivery_kb():
         [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
     ])
 
+
 def step_kb(back_callback: str):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="↩️ Назад", callback_data=back_callback)],
         [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
     ])
 
+
+def subscriptions_menu_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Добавить подписку", callback_data="sub_add")],
+        [InlineKeyboardButton(text="📋 Мои подписки", callback_data="sub_list")],
+        [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
+    ])
+
+
 def escape_html(text: str) -> str:
     if not text:
         return ""
     return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
+
 def make_author_tag(username: str, first_name: str, user_id: int) -> str:
     if username:
         return f'<a href="https://t.me/{username}">@{username}</a>'
     return f'<a href="tg://user?id={user_id}">{escape_html(first_name or "Продавец")}</a>'
+
 
 def build_post_text(ad, status="АКТУАЛЬНО", author_tag=None, author_id=None):
     if status == "ПРОДАНО":
@@ -272,7 +288,7 @@ def build_post_text(ad, status="АКТУАЛЬНО", author_tag=None, author_id=
     else:
         header = "✅АКТУАЛЬНО✅"
 
-        is_promoted = False
+    is_promoted = False
     try:
         is_promoted = bool(ad["is_promoted"])
     except (KeyError, IndexError):
@@ -316,7 +332,6 @@ def build_post_text(ad, status="АКТУАЛЬНО", author_tag=None, author_id=
         f"🥷🏻{tag}"
     )
     return text
-
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -327,6 +342,7 @@ async def cmd_start(message: types.Message):
         await db.commit()
     await message.answer("Добро пожаловать в JustTrade!", reply_markup=bottom_menu())
     await show_main_menu(message)
+
 
 async def show_main_menu(message: types.Message, user_id: int = None):
     uid = user_id or message.from_user.id
@@ -343,9 +359,11 @@ async def show_main_menu(message: types.Message, user_id: int = None):
     )
     await message.answer(text, reply_markup=main_menu_kb())
 
+
 @dp.message(F.text == "🏡 Главное меню")
 async def go_main(message: types.Message):
     await show_main_menu(message)
+
 
 @dp.callback_query(F.data == "main_menu")
 async def cb_main(callback: types.CallbackQuery):
@@ -356,10 +374,12 @@ async def cb_main(callback: types.CallbackQuery):
     await show_main_menu(callback.message, user_id=callback.from_user.id)
     await callback.answer()
 
+
 @dp.callback_query(F.data == "publish")
 async def cb_publish(callback: types.CallbackQuery):
     await callback.message.edit_text("Выберите способ публикации", reply_markup=publish_type_kb())
     await callback.answer()
+
 
 @dp.callback_query(F.data == "pub_free")
 async def cb_pub_free(callback: types.CallbackQuery, state: FSMContext):
@@ -373,6 +393,7 @@ async def cb_pub_free(callback: types.CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
+
 @dp.callback_query(F.data == "free_continue")
 async def cb_free_continue(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(is_trial=True, moderation_sent=False)
@@ -384,9 +405,10 @@ async def cb_free_continue(callback: types.CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
+
 @dp.callback_query(F.data == "pub_paid")
 async def cb_pub_paid(callback: types.CallbackQuery, state: FSMContext):
-    await state.update_data(paid_context="new", moderation_sent=False) 
+    await state.update_data(paid_context="new", moderation_sent=False)
     await callback.message.edit_text(
         "Отлично! Ваше объявление будет выставлено на 7 дней с публикацией "
         "в истории у Владельца, после окончания срока объявление будет снято "
@@ -400,14 +422,26 @@ async def cb_pub_paid(callback: types.CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
+
+# ---------- ПРОДВИЖЕНИЕ (ТОП) ----------
+
 @dp.callback_query(F.data.startswith("promote_"))
 async def cb_promote(callback: types.CallbackQuery, state: FSMContext):
-    # Пропускаем promote_stars и promote_donatepay — их ловят другие обработчики
     if callback.data in ("promote_stars", "promote_donatepay", "promote_donatepay_done", "promote_back"):
         return
-    try:
-        lot_id = int(callback.data.split("_")[1])
-    except (ValueError, IndexError):
+    parts = callback.data.split("_")
+    if len(parts) < 2 or not parts[1].isdigit():
+        return
+    lot_id = int(parts[1])
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM listings WHERE id = ? AND user_id = ? AND status = 'ACTIVE'",
+            (lot_id, callback.from_user.id)
+        ) as cur:
+            ad = await cur.fetchone()
+    if not ad:
+        await callback.answer("Объявление не найдено.", show_alert=True)
         return
     await state.update_data(promote_lot_id=lot_id, paid_context="promote")
     await callback.message.edit_text(
@@ -536,93 +570,8 @@ async def cb_promote_donatepay_done(callback: types.CallbackQuery, state: FSMCon
         )
     await callback.answer()
 
-@dp.callback_query(F.data == "promote_stars")
-async def cb_promote_stars(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    lot_id = data.get("promote_lot_id")
-    if not lot_id:
-        await callback.answer("Объявление не найдено.", show_alert=True)
-        return
-    await bot.send_invoice(
-        chat_id=callback.from_user.id,
-        title="Поднятие объявления в топ",
-        description="Закрепление в канале на 7 дней + пометка ТОП",
-        payload=f"promote_{lot_id}_{callback.from_user.id}",
-        currency="XTR",
-        prices=[LabeledPrice(label="XTR", amount=25)],
-        provider_token=""
-    )
-    await callback.answer()
 
-@dp.callback_query(F.data == "promote_donatepay")
-async def cb_promote_donatepay(callback: types.CallbackQuery, state: FSMContext):
-    await state.update_data(donatepay_pending=False)
-    text = (
-        "⚠️ Бот не может автоматически проверить пожертвование, поэтому его проверяет "
-        "Владелец бота @JustTechnic1. Для поднятия в топ потребуется:\n\n"
-        "1) Отправить донат по ссылке ниже\n"
-        "2) В строке имя укажите ваш никнейм/юзернейм\n"
-        "3) После оплаты нажмите «✅ Готово» — админ проверит поступление и подтвердит.\n\n"
-        "Обычно проверка занимает несколько минут."
-    )
-    await callback.message.edit_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💸 Перейти к оплате", url=DONATEPAY_PAGE_URL)],
-            [InlineKeyboardButton(text="✅ Готово", callback_data="promote_donatepay_done")],
-            [InlineKeyboardButton(text="↩️ Назад", callback_data="promote_back")]
-        ])
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data == "promote_donatepay_done")
-async def cb_promote_donatepay_done(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    if data.get("donatepay_pending"):
-        await callback.answer("Заявка уже отправлена, ожидайте проверки.", show_alert=True)
-        return
-    lot_id = data.get("promote_lot_id")
-    if not lot_id:
-        await callback.answer("Объявление не найдено.", show_alert=True)
-        return
-    username = callback.from_user.username
-    username_str = f"@{username}" if username else "нет username"
-    first_name = escape_html(callback.from_user.first_name or "")
-    text = (
-        f"💰 <b>Заявка на подтверждение DonatePay (ТОП)</b>\n\n"
-        f"Пользователь: {first_name} ({username_str})\n"
-        f"Telegram ID: <code>{callback.from_user.id}</code>\n"
-        f"Объявление #{lot_id}\n\n"
-        f"Сверьте никнейм с полем «Имя» в кабинете DonatePay.\n"
-        f"Проверьте поступление 25₽ и подтвердите."
-    )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text="✅ Подтвердить",
-            callback_data=f"dp_promote_confirm_{callback.from_user.id}_{lot_id}"
-        )],
-        [InlineKeyboardButton(
-            text="❌ Отклонить",
-            callback_data=f"dp_reject_{callback.from_user.id}"
-        )]
-    ])
-    try:
-        await bot.send_message(chat_id=ADMIN_ID, text=text, reply_markup=kb, parse_mode="HTML")
-    except Exception as e:
-        print(f"Не удалось отправить заявку админу: {e}")
-        await callback.answer("Ошибка, напишите в поддержку.", show_alert=True)
-        return
-    await state.update_data(donatepay_pending=True)
-    try:
-        await callback.message.edit_text(
-            "✅ Заявка отправлена админу. Как только оплата подтвердится — объявление будет закреплено.",
-            reply_markup=None
-        )
-    except Exception:
-        await callback.message.answer(
-            "✅ Заявка отправлена админу. Как только оплата подтвердится — объявление будет закреплено."
-        )
-    await callback.answer()
+# ---------- ОПЛАТА ЗВЁЗДАМИ / DONATEPAY ----------
 
 @dp.callback_query(F.data == "pay_stars")
 async def cb_pay_stars(callback: types.CallbackQuery, state: FSMContext):
@@ -647,6 +596,7 @@ async def cb_pay_stars(callback: types.CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
+
 @dp.callback_query(F.data == "pay_donatepay")
 async def cb_pay_donatepay(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(donatepay_initiated=True, donatepay_pending=False)
@@ -669,22 +619,18 @@ async def cb_pay_donatepay(callback: types.CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
+
 @dp.callback_query(F.data == "donatepay_done")
 async def cb_donatepay_done(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
-
-    # Защита от повторных нажатий
     if data.get("donatepay_pending"):
         await callback.answer("Заявка уже отправлена, ожидайте проверки.", show_alert=True)
         return
-
     context = data.get("paid_context", "new")
     renew_lot_id = data.get("renew_lot_id") if context == "renew" else None
-
     username = callback.from_user.username
     username_str = f"@{username}" if username else "нет username"
     first_name = escape_html(callback.from_user.first_name or "")
-
     text = (
         f"💰 <b>Заявка на подтверждение DonatePay</b>\n\n"
         f"Пользователь: {first_name} ({username_str})\n"
@@ -703,17 +649,13 @@ async def cb_donatepay_done(callback: types.CallbackQuery, state: FSMContext):
             callback_data=f"dp_reject_{callback.from_user.id}"
         )]
     ])
-
     try:
         await bot.send_message(chat_id=ADMIN_ID, text=text, reply_markup=kb, parse_mode="HTML")
     except Exception as e:
         print(f"Не удалось отправить заявку админу: {e}")
         await callback.answer("Ошибка, напишите в поддержку.", show_alert=True)
         return
-
-    # Ставим флаг только после успешной отправки
     await state.update_data(donatepay_pending=True)
-
     try:
         await callback.message.edit_text(
             "✅ Заявка отправлена админу. Как только оплата подтвердится — придёт уведомление.",
@@ -723,8 +665,8 @@ async def cb_donatepay_done(callback: types.CallbackQuery, state: FSMContext):
         await callback.message.answer(
             "✅ Заявка отправлена админу. Как только оплата подтвердится — придёт уведомление."
         )
-        
     await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("dp_confirm_"))
 async def cb_dp_confirm(callback: types.CallbackQuery):
@@ -735,6 +677,72 @@ async def cb_dp_confirm(callback: types.CallbackQuery):
     user_id = int(parts[2])
     context = parts[3]
     lot_id = int(parts[4])
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if context == "renew" and lot_id:
+            async with db.execute("SELECT * FROM listings WHERE id = ?", (lot_id,)) as cur:
+                ad = await cur.fetchone()
+            if not ad:
+                await callback.answer("Объявление не найдено.", show_alert=True)
+                return
+            new_expires = (datetime.now() + timedelta(days=7)).isoformat()
+            await db.execute(
+                "UPDATE listings SET status = 'ACTIVE', expires_at = ? WHERE id = ?",
+                (new_expires, lot_id)
+            )
+            await db.commit()
+            try:
+                author = await bot.get_chat(user_id)
+                tag = make_author_tag(author.username, author.first_name, user_id)
+            except Exception:
+                tag = f'<a href="tg://user?id={user_id}">Продавец</a>'
+            new_caption = build_post_text(ad, status="АКТУАЛЬНО", author_tag=tag, author_id=user_id)
+            pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
+            if not pairs and ad["channel"] and ad["message_id"]:
+                pairs = [f"{ad['channel']}:{ad['message_id']}"]
+            for pair in pairs:
+                pair = pair.strip()
+                if ":" not in pair:
+                    continue
+                ch, mid = pair.rsplit(":", 1)
+                try:
+                    await bot.edit_message_caption(
+                        chat_id=ch, message_id=int(mid),
+                        caption=new_caption, parse_mode="HTML"
+                    )
+                except Exception:
+                    try:
+                        await bot.edit_message_text(
+                            chat_id=ch, message_id=int(mid),
+                            text=new_caption, parse_mode="HTML"
+                        )
+                    except Exception as e:
+                        print(f"Не удалось отредактировать {ch}/{mid}: {e}")
+            try:
+                await bot.send_message(user_id, "✅ Оплата подтверждена! Публикация продлена на 7 дней.")
+            except Exception:
+                pass
+        else:
+            try:
+                await bot.send_message(
+                    user_id,
+                    "✅ Оплата подтверждена!\n\n"
+                    "Нужно выбрать, что ты хочешь сделать с товаром.\n"
+                    "Далее - по пунктам: тип товара, описание, цена, город, доставка, фото товара "
+                    "(при покупке можно без фото).\n\n"
+                    "Отмена любых действий: /cancel",
+                    reply_markup=ad_type_kb()
+                )
+            except Exception:
+                pass
+
+    try:
+        await callback.message.edit_text(callback.message.text + "\n\n✅ Подтверждено")
+    except Exception:
+        pass
+    await callback.answer("Подтверждено")
+
 
 @dp.callback_query(F.data.startswith("dp_promote_confirm_"))
 async def cb_dp_promote_confirm(callback: types.CallbackQuery):
@@ -795,89 +803,15 @@ async def cb_dp_promote_confirm(callback: types.CallbackQuery):
         except Exception as e:
             print(f"Не удалось закрепить {ch}/{mid}: {e}")
     try:
-        await bot.send_message(
-            user_id,
-            "✅ Оплата подтверждена! Объявление закреплено в топе на 7 дней."
-        )
+        await bot.send_message(user_id, "✅ Оплата подтверждена! Объявление закреплено в топе на 7 дней.")
     except Exception:
         pass
     try:
-        await callback.message.edit_text(
-            callback.message.text + "\n\n✅ Подтверждено"
-        )
+        await callback.message.edit_text(callback.message.text + "\n\n✅ Подтверждено")
     except Exception:
         pass
     await callback.answer("Подтверждено")
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        if context == "renew" and lot_id:
-            async with db.execute("SELECT * FROM listings WHERE id = ?", (lot_id,)) as cur:
-                ad = await cur.fetchone()
-            if not ad:
-                await callback.answer("Объявление не найдено.", show_alert=True)
-                return
-            new_expires = (datetime.now() + timedelta(days=7)).isoformat()
-            await db.execute(
-                "UPDATE listings SET status = 'ACTIVE', expires_at = ? WHERE id = ?",
-                (new_expires, lot_id)
-            )
-            await db.commit()
-            try:
-                author = await bot.get_chat(user_id)
-                tag = make_author_tag(author.username, author.first_name, user_id)
-            except Exception:
-                tag = f'<a href="tg://user?id={user_id}">Продавец</a>'
-            new_caption = build_post_text(ad, status="АКТУАЛЬНО", author_tag=tag, author_id=user_id)
-            pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
-            if not pairs and ad["channel"] and ad["message_id"]:
-                pairs = [f"{ad['channel']}:{ad['message_id']}"]
-            for pair in pairs:
-                pair = pair.strip()
-                if ":" not in pair:
-                    continue
-                ch, mid = pair.rsplit(":", 1)
-                try:
-                    await bot.edit_message_caption(
-                        chat_id=ch, message_id=int(mid),
-                        caption=new_caption, parse_mode="HTML"
-                    )
-                except Exception:
-                    try:
-                        await bot.edit_message_text(
-                            chat_id=ch, message_id=int(mid),
-                            text=new_caption, parse_mode="HTML"
-                        )
-                    except Exception as e:
-                        print(f"Не удалось отредактировать {ch}/{mid}: {e}")
-            try:
-                await bot.send_message(
-                    user_id,
-                    "✅ Оплата подтверждена! Публикация продлена на 7 дней."
-                )
-            except Exception:
-                pass
-        else:
-            try:
-                await bot.send_message(
-                    user_id,
-                    "✅ Оплата подтверждена!\n\n"
-                    "Нужно выбрать, что ты хочешь сделать с товаром.\n"
-                    "Далее - по пунктам: тип товара, описание, цена, город, доставка, фото товара "
-                    "(при покупке можно без фото).\n\n"
-                    "Отмена любых действий: /cancel",
-                    reply_markup=ad_type_kb()
-                )
-            except Exception:
-                pass
-
-    try:
-        await callback.message.edit_text(
-            callback.message.text + "\n\n✅ Подтверждено"
-        )
-    except Exception:
-        pass
-    await callback.answer("Подтверждено")
 
 @dp.callback_query(F.data.startswith("dp_reject_"))
 async def cb_dp_reject(callback: types.CallbackQuery):
@@ -898,6 +832,11 @@ async def cb_dp_reject(callback: types.CallbackQuery):
         pass
     await callback.answer("Отклонено")
 
+
+@dp.pre_checkout_query()
+async def pre_checkout(query: PreCheckoutQuery):
+    await query.answer(ok=True)
+
 @dp.callback_query(F.data.startswith("adtype_"))
 async def cb_adtype(callback: types.CallbackQuery, state: FSMContext):
     ad_type = callback.data.split("_")[1]
@@ -915,6 +854,7 @@ async def cb_adtype(callback: types.CallbackQuery, state: FSMContext):
         reply_markup=category_kb()
     )
     await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("cat_"), AdForm.choosing_category)
 async def cb_category(callback: types.CallbackQuery, state: FSMContext):
@@ -939,6 +879,7 @@ async def cb_category(callback: types.CallbackQuery, state: FSMContext):
             reply_markup=step_kb("back_to_category")
         )
     await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("subcat_"), AdForm.choosing_subcategory)
 async def cb_subcategory(callback: types.CallbackQuery, state: FSMContext):
@@ -971,6 +912,7 @@ async def back_to_category(callback: types.CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
+
 @dp.callback_query(F.data == "back_to_subcategory", AdForm.entering_model)
 async def back_to_subcategory(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -985,6 +927,7 @@ async def back_to_subcategory(callback: types.CallbackQuery, state: FSMContext):
     else:
         await back_to_category(callback, state)
     await callback.answer()
+
 
 @dp.message(AdForm.entering_model)
 async def process_model(message: types.Message, state: FSMContext):
@@ -1012,6 +955,7 @@ async def process_model(message: types.Message, state: FSMContext):
             reply_markup=step_kb("back_to_model")
         )
 
+
 @dp.callback_query(F.data == "back_to_model", AdForm.entering_memory)
 async def back_to_model_from_memory(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -1022,6 +966,7 @@ async def back_to_model_from_memory(callback: types.CallbackQuery, state: FSMCon
         reply_markup=step_kb("back_to_subcategory" if data.get("subcategory") else "back_to_category")
     )
     await callback.answer()
+
 
 @dp.message(AdForm.entering_memory)
 async def process_memory(message: types.Message, state: FSMContext):
@@ -1034,6 +979,7 @@ async def process_memory(message: types.Message, state: FSMContext):
         "Память уже указана, повторять не нужно.",
         reply_markup=step_kb("back_to_memory")
     )
+
 
 @dp.callback_query(F.data == "back_to_memory", AdForm.entering_description)
 async def back_to_memory(callback: types.CallbackQuery, state: FSMContext):
@@ -1056,6 +1002,7 @@ async def back_to_memory(callback: types.CallbackQuery, state: FSMContext):
         )
     await callback.answer()
 
+
 @dp.message(AdForm.entering_description)
 async def process_description(message: types.Message, state: FSMContext):
     if len(message.text) > 700:
@@ -1071,6 +1018,7 @@ async def process_description(message: types.Message, state: FSMContext):
         reply_markup=step_kb("back_to_description")
     )
 
+
 @dp.callback_query(F.data == "back_to_description", AdForm.entering_price)
 async def back_to_description(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -1082,6 +1030,7 @@ async def back_to_description(callback: types.CallbackQuery, state: FSMContext):
         reply_markup=step_kb("back_to_memory")
     )
     await callback.answer()
+
 
 @dp.message(AdForm.entering_price)
 async def process_price(message: types.Message, state: FSMContext):
@@ -1099,6 +1048,7 @@ async def process_price(message: types.Message, state: FSMContext):
         reply_markup=step_kb("back_to_price")
     )
 
+
 @dp.callback_query(F.data == "back_to_price", AdForm.entering_city)
 async def back_to_price(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -1111,6 +1061,7 @@ async def back_to_price(callback: types.CallbackQuery, state: FSMContext):
         reply_markup=step_kb("back_to_description")
     )
     await callback.answer()
+
 
 @dp.message(AdForm.entering_city)
 async def process_city(message: types.Message, state: FSMContext):
@@ -1126,6 +1077,7 @@ async def process_city(message: types.Message, state: FSMContext):
         reply_markup=delivery_kb()
     )
 
+
 @dp.callback_query(F.data == "back_to_city", AdForm.choosing_delivery)
 async def back_to_city(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -1139,6 +1091,7 @@ async def back_to_city(callback: types.CallbackQuery, state: FSMContext):
         reply_markup=step_kb("back_to_price")
     )
     await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("del_"), AdForm.choosing_delivery)
 async def process_delivery(callback: types.CallbackQuery, state: FSMContext):
@@ -1160,6 +1113,7 @@ async def process_delivery(callback: types.CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
+
 @dp.callback_query(F.data == "back_to_delivery", AdForm.uploading_photos)
 async def back_to_delivery(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -1172,6 +1126,7 @@ async def back_to_delivery(callback: types.CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
+
 @dp.message(AdForm.uploading_photos, F.photo)
 async def process_photo(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -1183,9 +1138,11 @@ async def process_photo(message: types.Message, state: FSMContext):
     await state.update_data(photos=photos)
     await message.answer(f"Загружено фотографий {len(photos)} из 10")
 
+
 @dp.message(AdForm.uploading_photos, F.video)
 async def reject_video(message: types.Message, state: FSMContext):
     await message.answer("Видео не поддерживается. Пожалуйста, отправьте фото.")
+
 
 @dp.callback_query(F.data == "photos_done", AdForm.uploading_photos)
 async def photos_done(callback: types.CallbackQuery, state: FSMContext):
@@ -1238,6 +1195,7 @@ async def photos_done(callback: types.CallbackQuery, state: FSMContext):
         await callback.message.answer("Выберите действие:", reply_markup=preview_kb)
     await callback.answer()
 
+
 @dp.callback_query(F.data == "back_to_photos", AdForm.preview)
 async def back_to_photos(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -1262,10 +1220,10 @@ async def back_to_photos(callback: types.CallbackQuery, state: FSMContext):
             await callback.message.answer(text, reply_markup=kb)
     await callback.answer()
 
+
 @dp.callback_query(F.data == "send_moderation", AdForm.preview)
 async def send_moderation(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    print(f"DEBUG: send_moderation data = {data}")   # <-- добавить эту строку
     if data.get("moderation_sent"):
         await callback.answer("Объявление уже отправлено на модерацию.", show_alert=True)
         return
@@ -1319,6 +1277,7 @@ async def send_moderation(callback: types.CallbackQuery, state: FSMContext):
         await bot.send_message(chat_id=ADMIN_ID, text=admin_text, reply_markup=admin_kb)
     await state.clear()
     await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("approve_"))
 async def approve_ad(callback: types.CallbackQuery):
@@ -1381,6 +1340,34 @@ async def approve_ad(callback: types.CallbackQuery):
         )
     except Exception:
         pass
+
+    # Уведомления подписчикам
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT DISTINCT user_id, keyword FROM subscriptions") as cur:
+                subs = await cur.fetchall()
+        text_to_check = (row['model'] + " " + row['description']).lower()
+        notified = set()
+        for s in subs:
+            if s['keyword'].lower() in text_to_check and s['user_id'] not in notified:
+                notified.add(s['user_id'])
+                try:
+                    link = ""
+                    if first_channel and first_message_id:
+                        link = f"https://t.me/{first_channel.lstrip('@')}/{first_message_id}"
+                    msg = f"🔔 Новое объявление по подписке «{escape_html(s['keyword'])}»:\n\n"
+                    msg += f"📦 {escape_html(row['model'])}\n"
+                    msg += f"💸 {escape_html(row['price'])} руб.\n"
+                    msg += f"🇷🇺 {escape_html(row['city'])}\n"
+                    if link:
+                        msg += f"\n🔗 <a href='{link}'>Открыть в канале</a>"
+                    await bot.send_message(s['user_id'], msg, parse_mode="HTML")
+                except Exception as e:
+                    print(f"Не удалось уведомить {s['user_id']}: {e}")
+    except Exception as e:
+        print(f"Ошибка уведомлений подписчикам: {e}")
+
     try:
         await callback.message.edit_caption(caption="Объявление одобрено и опубликовано.")
     except Exception:
@@ -1389,6 +1376,7 @@ async def approve_ad(callback: types.CallbackQuery):
         except Exception:
             await callback.message.answer("Объявление одобрено и опубликовано.")
     await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("reject_"))
 async def reject_ad(callback: types.CallbackQuery):
@@ -1406,7 +1394,6 @@ async def reject_ad(callback: types.CallbackQuery):
         await db.execute("UPDATE listings SET status = 'REJECTED' WHERE id = ?", (lot_id,))
         await db.commit()
 
-    # Возврат звёзд, если было оплачено Stars
     if row['charge_id']:
         try:
             await bot.refund_star_payment(
@@ -1461,6 +1448,7 @@ async def reject_ad(callback: types.CallbackQuery):
 
     await callback.answer()
 
+
 @dp.callback_query(F.data == "reset_ad")
 async def reset_ad(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
@@ -1470,6 +1458,7 @@ async def reset_ad(callback: types.CallbackQuery, state: FSMContext):
         pass
     await show_main_menu(callback.message, user_id=callback.from_user.id)
     await callback.answer()
+
 
 @dp.message(Command("cancel"))
 async def cancel(message: types.Message, state: FSMContext):
@@ -1482,9 +1471,11 @@ async def cb_my_ads(callback: types.CallbackQuery):
     await _send_my_ads(callback.message, callback.from_user.id)
     await callback.answer()
 
+
 @dp.message(F.text == "📚 Мои лоты")
 async def my_lots_message(message: types.Message):
     await _send_my_ads(message, message.from_user.id)
+
 
 async def _send_my_ads(target_message: types.Message, user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -1528,6 +1519,7 @@ async def _send_my_ads(target_message: types.Message, user_id: int):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
     )
 
+
 @dp.callback_query(F.data.startswith("lot_"))
 async def cb_lot_details(callback: types.CallbackQuery):
     lot_id = int(callback.data.split("_")[1])
@@ -1559,6 +1551,7 @@ async def cb_lot_details(callback: types.CallbackQuery):
 
     await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
     await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("remove_"))
 async def cb_remove_ad(callback: types.CallbackQuery):
@@ -1612,12 +1605,16 @@ async def cb_remove_ad(callback: types.CallbackQuery):
         await callback.message.answer("Объявление снято с продажи.")
     await callback.answer()
 
+
+# ---------- ПРОФИЛЬ ----------
+
 async def build_profile_text(user_id: int, first_name: str, username: str):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT first_seen FROM users WHERE user_id = ?", (user_id,)) as cur:
+        async with db.execute("SELECT first_seen, verified FROM users WHERE user_id = ?", (user_id,)) as cur:
             u = await cur.fetchone()
         first_seen = u["first_seen"][:10] if u and u["first_seen"] else "—"
+        verified = u["verified"] if u and u["verified"] else 0
 
         async with db.execute(
             "SELECT COUNT(*) FROM listings WHERE user_id = ? AND status = 'ACTIVE'", (user_id,)
@@ -1643,8 +1640,9 @@ async def build_profile_text(user_id: int, first_name: str, username: str):
             ads_lines += f"• {safe_model}\n"
 
     username_str = f"@{username}" if username else "нет"
+    badge = " ✅" if verified else ""
     text = (
-        f"👤 {escape_html(first_name)}\n"
+        f"👤 {escape_html(first_name)}{badge}\n"
         f"Профиль в JustTrade создан {first_seen}\n"
         f"Объявления: {active} актуально\n"
         f"Продано: {sold}\n"
@@ -1653,23 +1651,209 @@ async def build_profile_text(user_id: int, first_name: str, username: str):
     )
     return text
 
+
 @dp.callback_query(F.data == "profile")
 async def cb_profile(callback: types.CallbackQuery):
     await _send_profile(callback.message, callback.from_user)
     await callback.answer()
 
+
 @dp.message(F.text == "🥷🏻 Профиль")
 async def profile_message(message: types.Message):
     await _send_profile(message, message.from_user)
+
 
 async def _send_profile(target_message: types.Message, user):
     text = await build_profile_text(user.id, user.first_name, user.username)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Опубликовать", callback_data="publish")],
         [InlineKeyboardButton(text="📚 Мои лоты", callback_data="my_ads")],
+        [InlineKeyboardButton(text="🛡 Верификация (25 ⭐️)", callback_data="verify_start")],
         [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
     ])
     await target_message.answer(text, reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True)
+
+
+# ---------- ВЕРИФИКАЦИЯ ----------
+
+@dp.callback_query(F.data == "verify_start")
+async def cb_verify_start(callback: types.CallbackQuery, state: FSMContext):
+    await state.update_data(paid_context="verify")
+    await callback.message.edit_text(
+        "🛡 <b>Верификация продавца</b>\n\n"
+        "После оплаты в вашем профиле появится галочка «✅ Проверенный продавец».\n\n"
+        "Выберите способ оплаты:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="25⭐️", callback_data="verify_stars")],
+            [InlineKeyboardButton(text="25💸", callback_data="verify_donatepay")],
+            [InlineKeyboardButton(text="↩️ Назад", callback_data="profile")]
+        ]),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "verify_stars")
+async def cb_verify_stars(callback: types.CallbackQuery, state: FSMContext):
+    await bot.send_invoice(
+        chat_id=callback.from_user.id,
+        title="Верификация продавца",
+        description="Галочка «Проверенный продавец» в профиле",
+        payload=f"verify_{callback.from_user.id}",
+        currency="XTR",
+        prices=[LabeledPrice(label="XTR", amount=25)],
+        provider_token=""
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "verify_donatepay")
+async def cb_verify_donatepay(callback: types.CallbackQuery, state: FSMContext):
+    await state.update_data(donatepay_pending=False)
+    await callback.message.edit_text(
+        "⚠️ Для верификации через DonatePay отправьте донат и нажмите «✅ Готово».",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💸 Перейти к оплате", url=DONATEPAY_PAGE_URL)],
+            [InlineKeyboardButton(text="✅ Готово", callback_data="verify_donatepay_done")],
+            [InlineKeyboardButton(text="↩️ Назад", callback_data="verify_start")]
+        ])
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "verify_donatepay_done")
+async def cb_verify_donatepay_done(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    if data.get("donatepay_pending"):
+        await callback.answer("Заявка уже отправлена.", show_alert=True)
+        return
+    text = (
+        f"🛡 <b>Заявка на верификацию (DonatePay)</b>\n\n"
+        f"Пользователь: {escape_html(callback.from_user.first_name)} (@{callback.from_user.username or 'нет'})\n"
+        f"ID: <code>{callback.from_user.id}</code>\n\n"
+        f"Подтвердите оплату 25₽."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"dp_verify_confirm_{callback.from_user.id}")],
+        [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"dp_reject_{callback.from_user.id}")]
+    ])
+    try:
+        await bot.send_message(ADMIN_ID, text, reply_markup=kb, parse_mode="HTML")
+    except Exception as e:
+        print(f"Ошибка: {e}")
+        await callback.answer("Ошибка.", show_alert=True)
+        return
+    await state.update_data(donatepay_pending=True)
+    await callback.message.edit_text("✅ Заявка отправлена админу.")
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("dp_verify_confirm_"))
+async def cb_dp_verify_confirm(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    user_id = int(callback.data.split("_")[3])
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET verified = 1 WHERE user_id = ?", (user_id,))
+        await db.commit()
+    try:
+        await bot.send_message(user_id, "✅ Верификация подтверждена! Теперь в вашем профиле есть галочка.")
+    except Exception:
+        pass
+    await callback.message.edit_text(callback.message.text + "\n\n✅ Подтверждено")
+    await callback.answer("Подтверждено")
+
+
+# ---------- ПОДПИСКИ ----------
+
+@dp.callback_query(F.data == "subs_menu")
+async def cb_subs_menu(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "🔔 <b>Подписки на новые объявления</b>\n\n"
+        "Подпишитесь на ключевые слова — и бот пришлёт уведомление, когда появится подходящее объявление.",
+        reply_markup=subscriptions_menu_kb(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "sub_add")
+async def cb_sub_add(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(AdForm.waiting_for_subscription_keyword)
+    await callback.message.edit_text(
+        "Введите ключевое слово для подписки (например, «iPhone 13»):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="↩️ Назад", callback_data="subs_menu")]
+        ])
+    )
+    await callback.answer()
+
+
+@dp.message(AdForm.waiting_for_subscription_keyword)
+async def process_subscription_keyword(message: types.Message, state: FSMContext):
+    keyword = message.text.strip()
+    if len(keyword) < 2:
+        await message.answer("Слишком короткое слово, минимум 2 символа.")
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO subscriptions (user_id, keyword, created_at) VALUES (?, ?, ?)",
+            (message.from_user.id, keyword, datetime.now().isoformat())
+        )
+        await db.commit()
+    await state.clear()
+    await message.answer(f"✅ Подписка на «{escape_html(keyword)}» добавлена.")
+    await show_main_menu(message)
+
+
+@dp.callback_query(F.data == "sub_list")
+async def cb_sub_list(callback: types.CallbackQuery):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM subscriptions WHERE user_id = ? ORDER BY id DESC",
+            (callback.from_user.id,)
+        ) as cur:
+            subs = await cur.fetchall()
+    if not subs:
+        await callback.message.edit_text(
+            "У вас нет подписок.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="➕ Добавить", callback_data="sub_add")],
+                [InlineKeyboardButton(text="↩️ Назад", callback_data="subs_menu")]
+            ])
+        )
+        await callback.answer()
+        return
+    kb = []
+    for s in subs:
+        kb.append([InlineKeyboardButton(
+            text=f"❌ {s['keyword']}",
+            callback_data=f"sub_del_{s['id']}"
+        )])
+    kb.append([InlineKeyboardButton(text="↩️ Назад", callback_data="subs_menu")])
+    await callback.message.edit_text(
+        "📋 Ваши подписки. Нажмите, чтобы удалить:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("sub_del_"))
+async def cb_sub_del(callback: types.CallbackQuery):
+    sub_id = int(callback.data.split("_")[2])
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "DELETE FROM subscriptions WHERE id = ? AND user_id = ?",
+            (sub_id, callback.from_user.id)
+        )
+        await db.commit()
+    await callback.answer("Удалено")
+    await cb_sub_list(callback)
+
+
+# ---------- ПОМОЩЬ ----------
 
 @dp.callback_query(F.data == "help")
 async def cb_help(callback: types.CallbackQuery):
@@ -1687,6 +1871,7 @@ async def cb_help(callback: types.CallbackQuery):
     ])
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
+
 
 @dp.callback_query(F.data == "help_rules")
 async def cb_help_rules(callback: types.CallbackQuery):
@@ -1713,6 +1898,7 @@ async def cb_help_rules(callback: types.CallbackQuery):
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
+
 @dp.callback_query(F.data == "help_howto")
 async def cb_help_howto(callback: types.CallbackQuery):
     text = (
@@ -1738,6 +1924,7 @@ async def cb_help_howto(callback: types.CallbackQuery):
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
+
 @dp.callback_query(F.data == "help_reject")
 async def cb_help_reject(callback: types.CallbackQuery):
     text = (
@@ -1761,6 +1948,72 @@ async def cb_help_reject(callback: types.CallbackQuery):
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
+
+# ---------- КОМАНДЫ АДМИНА ----------
+
+@dp.message(Command("stats"))
+async def cmd_stats(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM listings") as cur:
+            total = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM listings WHERE status='ACTIVE'") as cur:
+            active = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM listings WHERE status='SOLD'") as cur:
+            sold = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM listings WHERE is_promoted=1") as cur:
+            promoted = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM users") as cur:
+            users = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM subscriptions") as cur:
+            subs = (await cur.fetchone())[0]
+    text = (
+        f"📊 <b>Статистика JustTrade</b>\n\n"
+        f"👥 Пользователей: {users}\n"
+        f"📦 Всего объявлений: {total}\n"
+        f"🟢 Активных: {active}\n"
+        f"🔴 Проданных: {sold}\n"
+        f"🔥 В топе: {promoted}\n"
+        f"🔔 Подписок: {subs}"
+    )
+    await message.answer(text, parse_mode="HTML")
+
+
+@dp.message(Command("dbinfo"))
+async def cmd_dbinfo(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("PRAGMA table_info(listings)") as cur:
+            cols = [row[1] for row in await cur.fetchall()]
+    await message.answer(f"Столбцы listings:\n<code>{escape_html(', '.join(cols))}</code>", parse_mode="HTML")
+
+
+@dp.message(Command("broadcast"))
+async def cmd_broadcast(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("Использование: /broadcast Текст сообщения")
+        return
+    text = parts[1]
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT user_id FROM users") as cur:
+            users = [row[0] for row in await cur.fetchall()]
+    sent = 0
+    failed = 0
+    for uid in users:
+        try:
+            await bot.send_message(uid, text, parse_mode="HTML")
+            sent += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            failed += 1
+    await message.answer(f"✅ Отправлено: {sent}\n❌ Не доставлено: {failed}")
+
+
 @dp.message(Command("restore"))
 async def restore_db(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
@@ -1771,6 +2024,8 @@ async def restore_db(message: types.Message, state: FSMContext):
         "⚠️ Внимание: восстановление временное. После перезапуска Render данные исчезнут.",
         parse_mode="Markdown"
     )
+
+
 @dp.message(AdForm.waiting_for_restore_db, F.document)
 async def process_restore_file(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
@@ -1794,6 +2049,10 @@ async def process_restore_file(message: types.Message, state: FSMContext):
         await message.answer(f"❌ Ошибка восстановления: {e}")
     finally:
         await state.clear()
+
+
+# ---------- ФОНОВЫЕ ЗАДАЧИ ----------
+
 async def expire_loop():
     while True:
         try:
@@ -1859,21 +2118,7 @@ async def expire_loop():
         except Exception as e:
             print(f"Ошибка в expire_loop: {e}")
         await asyncio.sleep(60)
-async def backup_loop():
-    while True:
-        try:
-            if os.path.exists(DB_PATH):
-                await bot.send_document(
-                    chat_id=ADMIN_ID,
-                    document=FSInputFile(DB_PATH),
-                    caption=f"Бэкап базы за {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-                )
-                print(f"Бэкап отправлен в {datetime.now()}")
-            else:
-                print(f"Файл {DB_PATH} не найден, бэкап пропущен")
-        except Exception as e:
-            print(f"Ошибка бэкапа: {e}")
-        await asyncio.sleep(3600)
+
 
 async def unpin_loop():
     while True:
@@ -1943,9 +2188,53 @@ async def unpin_loop():
             print(f"Ошибка в unpin_loop: {e}")
         await asyncio.sleep(60)
 
-@dp.pre_checkout_query()
-async def pre_checkout(query: PreCheckoutQuery):
-    await query.answer(ok=True)
+
+async def backup_loop():
+    while True:
+        try:
+            if os.path.exists(DB_PATH):
+                await bot.send_document(
+                    chat_id=ADMIN_ID,
+                    document=FSInputFile(DB_PATH),
+                    caption=f"Бэкап базы за {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                )
+                print(f"Бэкап отправлен в {datetime.now()}")
+            else:
+                print(f"Файл {DB_PATH} не найден, бэкап пропущен")
+        except Exception as e:
+            print(f"Ошибка бэкапа: {e}")
+        await asyncio.sleep(86400)
+
+
+# ---------- ПРОДЛЕНИЕ И ОПЛАТА ----------
+
+@dp.callback_query(F.data.startswith("renew_"))
+async def renew_cb(callback: types.CallbackQuery, state: FSMContext):
+    lot_id = int(callback.data.split("_")[1])
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM listings WHERE id = ? AND user_id = ?",
+            (lot_id, callback.from_user.id)
+        ) as cur:
+            ad = await cur.fetchone()
+    if not ad:
+        await callback.answer("Объявление не найдено.", show_alert=True)
+        return
+    await state.update_data(paid_context="renew", renew_lot_id=lot_id)
+    await callback.message.edit_text(
+        "Отлично! Ваше объявление будет выставлено на 7 дней с публикацией "
+        "в истории у Владельца, после окончания срока объявление будет снято "
+        "с продажи, но его можно будет продлить, если потребуется.\n\n"
+        "Выберите способ оплаты:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="25⭐️", callback_data="pay_stars")],
+            [InlineKeyboardButton(text="25💸", callback_data="pay_donatepay")],
+            [InlineKeyboardButton(text="↩️ Назад", callback_data="main_menu")]
+        ])
+    )
+    await callback.answer()
+
 
 @dp.message(F.successful_payment)
 async def on_successful_payment(message: Message, state: FSMContext):
@@ -1953,7 +2242,7 @@ async def on_successful_payment(message: Message, state: FSMContext):
     payload = payment.invoice_payload
     charge_id = payment.telegram_payment_charge_id
     user_id = message.from_user.id
-    
+
     if payload.startswith("promote_"):
         parts = payload.split("_")
         lot_id = int(parts[1])
@@ -2017,6 +2306,25 @@ async def on_successful_payment(message: Message, state: FSMContext):
                 f"Объявление #{lot_id}: {escape_html(ad['model'])}\n"
                 f"Сумма: 25 ⭐️\n"
                 f"Закреп до: {promoted_until[:10]}",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+        await state.clear()
+        return
+
+    if payload.startswith("verify_"):
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("UPDATE users SET verified = 1 WHERE user_id = ?", (user_id,))
+            await db.commit()
+        await message.answer("✅ Верификация подтверждена! В профиле появилась галочка.")
+        try:
+            await bot.send_message(
+                ADMIN_ID,
+                f"🛡 <b>Верификация (Stars)</b>\n\n"
+                f"Пользователь: {escape_html(message.from_user.first_name)} (@{message.from_user.username or 'нет'})\n"
+                f"ID: <code>{user_id}</code>\n"
+                f"Сумма: 25 ⭐️",
                 parse_mode="HTML"
             )
         except Exception:
@@ -2106,6 +2414,9 @@ async def on_successful_payment(message: Message, state: FSMContext):
     except Exception as e:
         print(f"Не удалось уведомить админа об оплате (новое): {e}")
 
+
+# ---------- ЗАПУСК ----------
+
 async def on_startup(bot: Bot):
     await init_db()
     base_url = os.getenv("RENDER_EXTERNAL_URL")
@@ -2120,8 +2431,10 @@ async def on_startup(bot: Bot):
     if DONATEPAY_PAGE_URL:
         print(f"DonatePay страница: {DONATEPAY_PAGE_URL}")
 
+
 async def health_check(request):
     return web.json_response({"status": "ok"})
+
 
 async def main():
     app = web.Application()
@@ -2131,9 +2444,11 @@ async def main():
     )
     webhook_requests_handler.register(app, path="/webhook")
     dp.callback_query.middleware(AntiSpamMiddleware(cooldown=2.0))
+    dp.message.middleware(AdminErrorMiddleware())
     dp.startup.register(on_startup)
     setup_application(app, dp, bot=bot)
     expire_task = asyncio.create_task(expire_loop())
+    unpin_task = asyncio.create_task(unpin_loop())
     backup_task = asyncio.create_task(backup_loop())
     port = int(os.getenv("PORT", 8080))
     runner = web.AppRunner(app)
@@ -2144,16 +2459,13 @@ async def main():
     try:
         await asyncio.Event().wait()
     finally:
-        expire_task.cancel()
-        backup_task.cancel()
-        try:
-            await expire_task
-        except asyncio.CancelledError:
-            pass
-        try:
-            await backup_task
-        except asyncio.CancelledError:
-            pass
+        for t in (expire_task, unpin_task, backup_task):
+            t.cancel()
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
+
 
 if __name__ == "__main__":
     asyncio.run(main())
