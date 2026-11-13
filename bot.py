@@ -138,7 +138,7 @@ async def init_db():
                     print(f"DEBUG: {ddl} -> {e}")
                     raise
 
-                await db.execute("""
+        await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 first_seen TIMESTAMP,
@@ -154,8 +154,23 @@ async def init_db():
             else:
                 print(f"DEBUG: users.verified error: {e}")
 
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                keyword TEXT NOT NULL,
+                created_at TIMESTAMP
+            )
+        """)
+        await db.commit()
+        print("DEBUG: init_db finished")
+
 async def save_listing(user_id, data, status='PENDING_MODERATION', is_trial=False):
     async with aiosqlite.connect(DB_PATH) as db:
+        try:
+            await db.execute("ALTER TABLE listings ADD COLUMN subcategory TEXT")
+        except sqlite3.OperationalError:
+            pass
         duration = timedelta(hours=24) if is_trial else timedelta(days=7)
         now = datetime.now()
         expires = (now + duration).isoformat()
