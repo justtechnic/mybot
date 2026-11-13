@@ -137,7 +137,8 @@ async def init_db():
                 if "duplicate column name" not in str(e).lower():
                     print(f"DEBUG: {ddl} -> {e}")
                     raise
-                await db.execute("""
+
+        await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 first_seen TIMESTAMP,
@@ -153,17 +154,8 @@ async def init_db():
             else:
                 print(f"DEBUG: users.verified error: {e}")
                 raise
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS subscriptions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                keyword TEXT NOT NULL,
-                created_at TIMESTAMP
-            )
-        """)
         await db.commit()
         print("DEBUG: init_db finished")
-
 
 async def save_listing(user_id, data, status='PENDING_MODERATION', is_trial=False):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -1653,10 +1645,16 @@ async def cb_remove_ad(callback: types.CallbackQuery):
 async def build_profile_text(user_id: int, first_name: str, username: str):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT first_seen, verified FROM users WHERE user_id = ?", (user_id,)) as cur:
-            u = await cur.fetchone()
-        first_seen = u["first_seen"][:10] if u and u["first_seen"] else "—"
-        verified = u["verified"] if u and u["verified"] else 0
+        try:
+            async with db.execute("SELECT first_seen, verified FROM users WHERE user_id = ?", (user_id,)) as cur:
+                u = await cur.fetchone()
+            first_seen = u["first_seen"][:10] if u and u["first_seen"] else "—"
+            verified = u["verified"] if u and u["verified"] else 0
+        except Exception:
+            async with db.execute("SELECT first_seen FROM users WHERE user_id = ?", (user_id,)) as cur:
+                u = await cur.fetchone()
+            first_seen = u["first_seen"][:10] if u and u["first_seen"] else "—"
+            verified = 0
 
         async with db.execute(
             "SELECT COUNT(*) FROM listings WHERE user_id = ? AND status = 'ACTIVE'", (user_id,)
