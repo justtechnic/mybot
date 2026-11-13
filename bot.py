@@ -27,6 +27,12 @@ SUPPORT_CONTACT = "@justtechnic1"
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 DONATEPAY_PAGE_URL = os.getenv("DONATEPAY_PAGE_URL", "https://new.donatepay.ru/@1409884")
 
+SUBCATEGORIES = {
+    "Аудио": ["Наушники", "Колонка", "Микрофон"],
+    "Запчасти/лот": ["Запчасти", "Лот"],
+    "Прочее": ["Аксессуары", "Приставка", "Дисплей", "Клавиатура", "Мышка"],
+}
+
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
@@ -58,6 +64,7 @@ class AntiSpamMiddleware:
 class AdForm(StatesGroup):
     choosing_type = State()
     choosing_category = State()
+    choosing_subcategory = State()
     entering_model = State()
     entering_memory = State()
     entering_description = State()
@@ -182,6 +189,12 @@ def category_kb():
         [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
     ])
 
+def subcategory_kb(subcats: list):          # <-- вставить здесь
+    kb = [[InlineKeyboardButton(text=name, callback_data=f"subcat_{name}")] for name in subcats]
+    kb.append([InlineKeyboardButton(text="↩️ Назад", callback_data="back_to_category")])
+    kb.append([InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
 def delivery_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Отправлю", callback_data="del_yes")],
@@ -229,6 +242,8 @@ def build_post_text(ad, status="АКТУАЛЬНО", author_tag=None, author_id=
 
     text = f"{header}\n#{safe_category}\n#{safe_city}\n\n"
     text += f"📦 {safe_model}\n\n"
+    if ad.get("subcategory"):
+        text += f"🔹 {escape_html(ad['subcategory'])}\n\n"
     if safe_memory:
         text += f"💾Память: {safe_memory}\n\n"
     text += (
@@ -550,12 +565,34 @@ async def cb_category(callback: types.CallbackQuery, state: FSMContext):
     }
     category_name = cat_names.get(cat, cat)
     await state.update_data(category=category_name)
+
+    if category_name in SUBCATEGORIES:
+        await state.set_state(AdForm.choosing_subcategory)
+        await callback.message.edit_text(
+            f"{category_name}.\n\nВыберите подкатегорию:",
+            reply_markup=subcategory_kb(SUBCATEGORIES[category_name])
+        )
+    else:
+        await state.set_state(AdForm.entering_model)
+        await callback.message.edit_text(
+            f"{category_name}.\n\nНапишите модель устройства или ключевую особенность.",
+            reply_markup=step_kb("back_to_category")
+        )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("subcat_"), AdForm.choosing_subcategory)
+async def cb_subcategory(callback: types.CallbackQuery, state: FSMContext):
+    subcat = callback.data.replace("subcat_", "")
+    data = await state.get_data()
+    category = data.get("category")
+    await state.update_data(subcategory=subcat)
     await state.set_state(AdForm.entering_model)
     await callback.message.edit_text(
-        f"{category_name}.\n\nНапишите модель устройства или ключевую особенность.",
-        reply_markup=step_kb("back_to_category")
+        f"{category} → {subcat}.\n\nНапишите модель устройства или ключевую особенность.",
+        reply_markup=step_kb("back_to_subcategory")
     )
     await callback.answer()
+
 
 @dp.callback_query(F.data == "back_to_category", AdForm.entering_model)
 async def back_to_category(callback: types.CallbackQuery, state: FSMContext):
@@ -574,6 +611,21 @@ async def back_to_category(callback: types.CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
+@dp.callback_query(F.data == "back_to_subcategory", AdForm.entering_model)
+async def back_to_subcategory(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    category = data.get("category")
+    if category in SUBCATEGORIES:
+        await state.update_data(subcategory=None, model=None)
+        await state.set_state(AdForm.choosing_subcategory)
+        await callback.message.edit_text(
+            f"{category}.\n\nВыберите подкатегорию:",
+            reply_markup=subcategory_kb(SUBCATEGORIES[category])
+        )
+    else:
+        await back_to_category(callback, state)
+    await callback.answer()
+
 @dp.message(AdForm.entering_model)
 async def process_model(message: types.Message, state: FSMContext):
     if len(message.text) > 200:
@@ -582,7 +634,7 @@ async def process_model(message: types.Message, state: FSMContext):
     await state.update_data(model=message.text)
     data = await state.get_data()
     category = data.get('category')
-    no_memory_categories = {"Прочее", "Услуги", "Запчасти/лот"}
+    no_memory_categories = {"Прочее", "Услуги", "Запчасти/лот", "Аудио"}
     if category in no_memory_categories:
         await state.update_data(memory="—")
         await state.set_state(AdForm.entering_description)
@@ -607,7 +659,7 @@ async def back_to_model_from_memory(callback: types.CallbackQuery, state: FSMCon
     await state.set_state(AdForm.entering_model)
     await callback.message.edit_text(
         f"{data['category']}.\n\nНапишите модель устройства или ключевую особенность.",
-        reply_markup=step_kb("back_to_category")
+        reply_markup=step_kb("back_to_subcategory" if data.get("subcategory") else "back_to_category")
     )
     await callback.answer()
 
@@ -630,8 +682,9 @@ async def back_to_memory(callback: types.CallbackQuery, state: FSMContext):
     if data.get('memory') == "—":
         await state.set_state(AdForm.entering_model)
         await callback.message.edit_text(
-            f"{data['category']}.\n\nНапишите модель устройства или ключевую особенность.",
-            reply_markup=step_kb("back_to_category")
+            f"{data['category']}, 💾Память\n\n"
+            "Напишите модель устройства или ключевую особенность.",
+            reply_markup=step_kb("back_to_subcategory" if data.get("subcategory") else "back_to_category")
         )
     else:
         await state.set_state(AdForm.entering_memory)
