@@ -1309,10 +1309,12 @@ async def approve_ad(callback: types.CallbackQuery):
             author_tag = make_author_tag(author.username, author.first_name, row['user_id'])
         except Exception:
             author_tag = f'<a href="tg://user?id={row["user_id"]}">Продавец</a>'
-        async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute("SELECT verified FROM users WHERE user_id = ?", (row['user_id'],)) as cur:
+
+        async with aiosqlite.connect(DB_PATH) as db2:
+            async with db2.execute("SELECT verified FROM users WHERE user_id = ?", (row['user_id'],)) as cur:
                 u = await cur.fetchone()
             verified = bool(u[0]) if u else False
+
         post_text = build_post_text(row, status="АКТУАЛЬНО", author_tag=author_tag, author_id=row['user_id'], verified=verified)
         photos = row['photos'].split(",") if row['photos'] else []
         saved_pairs = []
