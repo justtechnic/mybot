@@ -137,7 +137,7 @@ async def init_db():
                 if "duplicate column name" not in str(e).lower():
                     print(f"DEBUG: {ddl} -> {e}")
                     raise
-        await db.execute("""
+                await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 first_seen TIMESTAMP,
@@ -146,8 +146,12 @@ async def init_db():
         """)
         try:
             await db.execute("ALTER TABLE users ADD COLUMN verified INTEGER DEFAULT 0")
+            print("DEBUG: users.verified added")
         except sqlite3.OperationalError as e:
-            if "duplicate column name" not in str(e).lower():
+            if "duplicate column name" in str(e).lower():
+                print("DEBUG: users.verified exists")
+            else:
+                print(f"DEBUG: users.verified error: {e}")
                 raise
         await db.execute("""
             CREATE TABLE IF NOT EXISTS subscriptions (
