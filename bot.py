@@ -1564,8 +1564,33 @@ async def cb_remove_ad(callback: types.CallbackQuery):
         if not ad:
             await callback.answer("Объявление не найдено или уже снято.", show_alert=True)
             return
-        await db.execute("UPDATE listings SET status = 'SOLD' WHERE id = ?", (lot_id,))
+
+        # Сохраняем флаг ДО update
+        try:
+            was_promoted = bool(ad["is_promoted"])
+        except (KeyError, IndexError):
+            was_promoted = False
+
+        await db.execute(
+            "UPDATE listings SET status = 'SOLD', is_promoted = 0, promoted_until = NULL WHERE id = ?",
+            (lot_id,)
+        )
         await db.commit()
+
+    # Открепляем, если было закреплено
+    if was_promoted:
+        pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
+        if not pairs and ad["channel"] and ad["message_id"]:
+            pairs = [f"{ad['channel']}:{ad['message_id']}"]
+        for pair in pairs:
+            pair = pair.strip()
+            if ":" not in pair:
+                continue
+            ch, mid = pair.rsplit(":", 1)
+            try:
+                await bot.unpin_chat_message(chat_id=ch, message_id=int(mid))
+            except Exception as e:
+                print(f"Не удалось открепить {ch}/{mid}: {e}")
 
     try:
         author = await bot.get_chat(ad['user_id'])
@@ -1601,7 +1626,6 @@ async def cb_remove_ad(callback: types.CallbackQuery):
     except Exception:
         await callback.message.answer("Объявление снято с продажи.")
     await callback.answer()
-
 
 # ---------- ПРОФИЛЬ ----------
 
