@@ -134,7 +134,7 @@ async def save_listing(user_id, data, status='PENDING_MODERATION', is_trial=Fals
                 price, city, delivery, photos, status, created_at,
                 expires_at, is_trial, charge_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             user_id, data.get('ad_type'), data.get('category'), data.get('subcategory'), data.get('model'),
             data.get('memory'), data.get('description'), data.get('price'),
@@ -325,7 +325,7 @@ async def cb_pub_free(callback: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "free_continue")
 async def cb_free_continue(callback: types.CallbackQuery, state: FSMContext):
-    await state.update_data(is_trial=True)
+    await state.update_data(is_trial=True, moderation_sent=False)
     await callback.message.edit_text(
         "Нужно выбрать, что ты хочешь сделать с товаром.\n"
         "Далее - по пунктам: тип товара, описание, цена, город, доставка, фото товара (при покупке можно без фото).\n\n"
@@ -336,7 +336,7 @@ async def cb_free_continue(callback: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "pub_paid")
 async def cb_pub_paid(callback: types.CallbackQuery, state: FSMContext):
-    await state.update_data(paid_context="new")
+    await state.update_data(paid_context="new", moderation_sent=False) 
     await callback.message.edit_text(
         "Отлично! Ваше объявление будет выставлено на 7 дней с публикацией "
         "в истории у Владельца, после окончания срока объявление будет снято "
@@ -355,6 +355,7 @@ async def cb_pay_stars(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     context = data.get("paid_context", "new")
     if context == "renew":
+        await state.update_data(moderation_sent=False)
         lot_id = data.get("renew_lot_id")
         payload = f"renew_{lot_id}_{callback.from_user.id}"
         title = "Продление объявления на 7 дней"
@@ -1433,116 +1434,70 @@ async def process_restore_file(message: types.Message, state: FSMContext):
     finally:
         await state.clear()
 async def expire_loop():
-    try:
-        while True:
-            try:
-                now = datetime.now().isoformat()
-                async with aiosqlite.connect(DB_PATH) as db:
-                    db.row_factory = aiosqlite.Row
-                    async with db.execute(
-                        "SELECT * FROM listings WHERE status = 'ACTIVE' AND expires_at IS NOT NULL AND expires_at <= ?",
-                        (now,)
-                    ) as cur:
-                        expired = await cur.fetchall()
-
-                for ad in expired:
-                    async with aiosqlite.connect(DB_PATH) as db:
-                        cur = await db.execute(
-                            "UPDATE listings SET status = 'SOLD' WHERE id = ? AND status = 'ACTIVE'",
-                            (ad["id"],)
-                        )
-                        await db.commit()
-                        if cur.rowcount == 0:
-                            continue
-
-                    try:
-                        author = await bot.get_chat(ad['user_id'])
-                        tag = make_author_tag(author.username, author.first_name, ad['user_id'])
-                    except Exception:
-                        tag = f'<a href="tg://user?id={ad["user_id"]}">Продавец</a>'
-                    new_caption = build_post_text(ad, status="ПРОДАНО", author_tag=tag, author_id=ad['user_id'])
-
-                    pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
-                    if not pairs and ad["channel"] and ad["message_id"]:
-                        pairs = [f"{ad['channel']}:{ad['message_id']}"]
-                    for pair in pairs:
-                        pair = pair.strip()
-                        if ":" not in pair:
-                            continue
-                        ch, mid = pair.rsplit(":", 1)
-                        try:
-                            await bot.edit_message_caption(
-                                chat_id=ch, message_id=int(mid),
-                                caption=new_caption, parse_mode="HTML"
-                            )
-                        except Exception:
-                            try:
-                                await bot.edit_message_text(
-                                    chat_id=ch, message_id=int(mid),
-                                    text=new_caption, parse_mode="HTML"
-                                )
-                            except Exception as e:
-                                print(f"Ошибка редактирования {ch}/{mid}: {e}")
-
-                    try:
-                        await bot.send_message(
-                            ad["user_id"],
-                            f"У вашего объявления «{ad['model']}» кончился срок публикации. Хотите ли вы его продлить?",
-                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                [InlineKeyboardButton(text="💸 Продлить", callback_data=f"renew_{ad['id']}")],
-                                [InlineKeyboardButton(text="🗑️ Снять с продажи", callback_data=f"remove_{ad['id']}")]
-                            ])
-                        )
-                    except Exception as e:
-                        print(f"Не удалось уведомить {ad['user_id']}: {e}")
-            except Exception as e:
-                print(f"Ошибка в expire_loop: {e}")
-            await asyncio.sleep(60)
-    except asyncio.CancelledError:
-        print("expire_loop остановлен")
-        raise
-async def backup_loop():
     while True:
         try:
-            if os.path.exists(DB_PATH):
-                await bot.send_document(
-                    chat_id=ADMIN_ID,
-                    document=types.FSInputFile(DB_PATH),
-                    caption=f"Бэкап базы за {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-                )
-                print(f"Бэкап отправлен в {datetime.now()}")
-            else:
-                print(f"Файл {DB_PATH} не найден, бэкап пропущен")
-        except Exception as e:
-            print(f"Ошибка бэкапа: {e}")
-        await asyncio.sleep(3600)
+            now = datetime.now().isoformat()
+            async with aiosqlite.connect(DB_PATH) as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT * FROM listings WHERE status = 'ACTIVE' AND expires_at IS NOT NULL AND expires_at <= ?",
+                    (now,)
+                ) as cur:
+                    expired = await cur.fetchall()
 
-@dp.callback_query(F.data.startswith("renew_"))
-async def renew_cb(callback: types.CallbackQuery, state: FSMContext):
-    lot_id = int(callback.data.split("_")[1])
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM listings WHERE id = ? AND user_id = ?",
-            (lot_id, callback.from_user.id)
-        ) as cur:
-            ad = await cur.fetchone()
-    if not ad:
-        await callback.answer("Объявление не найдено.", show_alert=True)
-        return
-    await state.update_data(paid_context="renew", renew_lot_id=lot_id)
-    await callback.message.edit_text(
-        "Отлично! Ваше объявление будет выставлено на 7 дней с публикацией "
-        "в истории у Владельца, после окончания срока объявление будет снято "
-        "с продажи, но его можно будет продлить, если потребуется.\n\n"
-        "Выберите способ оплаты:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="25⭐️", callback_data="pay_stars")],
-            [InlineKeyboardButton(text="25💸", callback_data="pay_donatepay")],
-            [InlineKeyboardButton(text="↩️ Назад", callback_data="main_menu")]
-        ])
-    )
-    await callback.answer()
+            for ad in expired:
+                async with aiosqlite.connect(DB_PATH) as db:
+                    cur = await db.execute(
+                        "UPDATE listings SET status = 'SOLD' WHERE id = ? AND status = 'ACTIVE'",
+                        (ad["id"],)
+                    )
+                    await db.commit()
+                    if cur.rowcount == 0:
+                        continue
+
+                try:
+                    author = await bot.get_chat(ad['user_id'])
+                    tag = make_author_tag(author.username, author.first_name, ad['user_id'])
+                except Exception:
+                    tag = f'<a href="tg://user?id={ad["user_id"]}">Продавец</a>'
+                new_caption = build_post_text(ad, status="ПРОДАНО", author_tag=tag, author_id=ad['user_id'])
+
+                pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
+                if not pairs and ad["channel"] and ad["message_id"]:
+                    pairs = [f"{ad['channel']}:{ad['message_id']}"]
+                for pair in pairs:
+                    pair = pair.strip()
+                    if ":" not in pair:
+                        continue
+                    ch, mid = pair.rsplit(":", 1)
+                    try:
+                        await bot.edit_message_caption(
+                            chat_id=ch, message_id=int(mid),
+                            caption=new_caption, parse_mode="HTML"
+                        )
+                    except Exception:
+                        try:
+                            await bot.edit_message_text(
+                                chat_id=ch, message_id=int(mid),
+                                text=new_caption, parse_mode="HTML"
+                            )
+                        except Exception as e:
+                            print(f"Ошибка редактирования {ch}/{mid}: {e}")
+
+                try:
+                    await bot.send_message(
+                        ad["user_id"],
+                        f"У вашего объявления «{ad['model']}» кончился срок публикации. Хотите ли вы его продлить?",
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="💸 Продлить", callback_data=f"renew_{ad['id']}")],
+                            [InlineKeyboardButton(text="🗑️ Снять с продажи", callback_data=f"remove_{ad['id']}")]
+                        ])
+                    )
+                except Exception as e:
+                    print(f"Не удалось уведомить {ad['user_id']}: {e}")
+        except Exception as e:
+            print(f"Ошибка в expire_loop: {e}")
+        await asyncio.sleep(60)
 
 @dp.pre_checkout_query()
 async def pre_checkout(query: PreCheckoutQuery):
