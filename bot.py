@@ -282,7 +282,7 @@ def make_author_tag(username: str, first_name: str, user_id: int) -> str:
     return f'<a href="tg://user?id={user_id}">{escape_html(first_name or "Продавец")}</a>'
 
 
-def build_post_text(ad, status="АКТУАЛЬНО", author_tag=None, author_id=None):
+def build_post_text(ad, status="АКТУАЛЬНО", author_tag=None, author_id=None, verified=False):
     if status == "ПРОДАНО":
         header = "❌ПРОДАНО❌"
     else:
@@ -302,6 +302,9 @@ def build_post_text(ad, status="АКТУАЛЬНО", author_tag=None, author_id=
         tag = f'<a href="tg://user?id={author_id}">Продавец</a>'
     else:
         tag = str(ad["user_id"])
+
+    if verified:
+        tag = f"{tag} ✅"
 
     safe_model = escape_html(ad["model"])
     safe_category = escape_html(ad["category"])
@@ -694,7 +697,13 @@ async def cb_dp_confirm(callback: types.CallbackQuery):
                 tag = make_author_tag(author.username, author.first_name, user_id)
             except Exception:
                 tag = f'<a href="tg://user?id={user_id}">Продавец</a>'
-            new_caption = build_post_text(ad, status="АКТУАЛЬНО", author_tag=tag, author_id=user_id)
+
+            async with aiosqlite.connect(DB_PATH) as db2:
+                async with db2.execute("SELECT verified FROM users WHERE user_id = ?", (user_id,)) as cur2:
+                    u2 = await cur2.fetchone()
+                verified = bool(u2[0]) if u2 else False
+
+            new_caption = build_post_text(ad, status="АКТУАЛЬНО", author_tag=tag, author_id=user_id, verified=verified)
             pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
             if not pairs and ad["channel"] and ad["message_id"]:
                 pairs = [f"{ad['channel']}:{ad['message_id']}"]
@@ -770,7 +779,13 @@ async def cb_dp_promote_confirm(callback: types.CallbackQuery):
         tag = f'<a href="tg://user?id={user_id}">Продавец</a>'
     ad_dict = dict(ad)
     ad_dict["is_promoted"] = 1
-    post_text = build_post_text(ad_dict, status="АКТУАЛЬНО", author_tag=tag, author_id=user_id)
+
+    async with aiosqlite.connect(DB_PATH) as db2:
+        async with db2.execute("SELECT verified FROM users WHERE user_id = ?", (user_id,)) as cur2:
+            u2 = await cur2.fetchone()
+        verified = bool(u2[0]) if u2 else False
+
+    post_text = build_post_text(ad_dict, status="АКТУАЛЬНО", author_tag=tag, author_id=user_id, verified=verified)
     pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
     if not pairs and ad["channel"] and ad["message_id"]:
         pairs = [f"{ad['channel']}:{ad['message_id']}"]
@@ -1294,7 +1309,11 @@ async def approve_ad(callback: types.CallbackQuery):
             author_tag = make_author_tag(author.username, author.first_name, row['user_id'])
         except Exception:
             author_tag = f'<a href="tg://user?id={row["user_id"]}">Продавец</a>'
-        post_text = build_post_text(row, status="АКТУАЛЬНО", author_tag=author_tag, author_id=row['user_id'])
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute("SELECT verified FROM users WHERE user_id = ?", (row['user_id'],)) as cur:
+                u = await cur.fetchone()
+            verified = bool(u[0]) if u else False
+        post_text = build_post_text(row, status="АКТУАЛЬНО", author_tag=author_tag, author_id=row['user_id'], verified=verified)
         photos = row['photos'].split(",") if row['photos'] else []
         saved_pairs = []
         first_channel = ""
@@ -1597,7 +1616,11 @@ async def cb_remove_ad(callback: types.CallbackQuery):
         tag = make_author_tag(author.username, author.first_name, ad['user_id'])
     except Exception:
         tag = f'<a href="tg://user?id={ad["user_id"]}">Продавец</a>'
-    new_caption = build_post_text(ad, status="ПРОДАНО", author_tag=tag, author_id=ad['user_id'])
+    async with aiosqlite.connect(DB_PATH) as db2:
+        async with db2.execute("SELECT verified FROM users WHERE user_id = ?", (ad['user_id'],)) as cur2:
+            u2 = await cur2.fetchone()
+        verified = bool(u2[0]) if u2 else False
+    new_caption = build_post_text(ad, status="ПРОДАНО", author_tag=tag, author_id=ad['user_id'], verified=verified)
 
     pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
     if not pairs and ad["channel"] and ad["message_id"]:
@@ -1775,8 +1798,47 @@ async def cb_dp_verify_confirm(callback: types.CallbackQuery):
         await callback.answer("Нет доступа", show_alert=True)
         return
     user_id = int(callback.data.split("_")[3])
+
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE users SET verified = 1 WHERE user_id = ?", (user_id,))
+        await db.commit()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM listings WHERE user_id = ? AND status = 'ACTIVE'",
+            (user_id,)
+        ) as cur:
+            ads = await cur.fetchall()
+
+        for ad in ads:
+            try:
+                author = await bot.get_chat(ad['user_id'])
+                tag = make_author_tag(author.username, author.first_name, ad['user_id'])
+            except Exception:
+                tag = f'<a href="tg://user?id={ad["user_id"]}">Продавец</a>'
+            new_caption = build_post_text(ad, status="АКТУАЛЬНО", author_tag=tag, author_id=ad['user_id'], verified=True)
+            pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
+            if not pairs and ad["channel"] and ad["message_id"]:
+                pairs = [f"{ad['channel']}:{ad['message_id']}"]
+            for pair in pairs:
+                pair = pair.strip()
+                if ":" not in pair:
+                    continue
+                ch, mid = pair.rsplit(":", 1)
+                try:
+                    await bot.edit_message_caption(
+                        chat_id=ch, message_id=int(mid),
+                        caption=new_caption, parse_mode="HTML"
+                    )
+                except Exception:
+                    try:
+                        await bot.edit_message_text(
+                            chat_id=ch, message_id=int(mid),
+                            text=new_caption, parse_mode="HTML"
+                        )
+                    except Exception as e:
+                        print(f"Не удалось отредактировать {ch}/{mid}: {e}")
         await db.commit()
     try:
         await bot.send_message(user_id, "✅ Верификация подтверждена! Теперь в вашем профиле есть галочка.")
@@ -2101,8 +2163,13 @@ async def expire_loop():
                     tag = make_author_tag(author.username, author.first_name, ad['user_id'])
                 except Exception:
                     tag = f'<a href="tg://user?id={ad["user_id"]}">Продавец</a>'
-                new_caption = build_post_text(ad, status="ПРОДАНО", author_tag=tag, author_id=ad['user_id'])
 
+                async with aiosqlite.connect(DB_PATH) as db2:
+                    async with db2.execute("SELECT verified FROM users WHERE user_id = ?", (ad['user_id'],)) as cur2:
+                        u2 = await cur2.fetchone()
+                    verified = bool(u2[0]) if u2 else False
+
+                new_caption = build_post_text(ad, status="ПРОДАНО", author_tag=tag, author_id=ad['user_id'], verified=verified)
                 pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
                 if not pairs and ad["channel"] and ad["message_id"]:
                     pairs = [f"{ad['channel']}:{ad['message_id']}"]
@@ -2169,8 +2236,13 @@ async def unpin_loop():
 
                 ad_dict = dict(ad)
                 ad_dict["is_promoted"] = 0
-                new_caption = build_post_text(ad_dict, status="АКТУАЛЬНО", author_tag=tag, author_id=ad['user_id'])
 
+                async with aiosqlite.connect(DB_PATH) as db2:
+                    async with db2.execute("SELECT verified FROM users WHERE user_id = ?", (ad['user_id'],)) as cur2:
+                        u2 = await cur2.fetchone()
+                    verified = bool(u2[0]) if u2 else False
+
+                new_caption = build_post_text(ad_dict, status="АКТУАЛЬНО", author_tag=tag, author_id=ad['user_id'], verified=verified)
                 pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
                 if not pairs and ad["channel"] and ad["message_id"]:
                     pairs = [f"{ad['channel']}:{ad['message_id']}"]
@@ -2288,12 +2360,20 @@ async def on_successful_payment(message: Message, state: FSMContext):
             tag = f'<a href="tg://user?id={ad["user_id"]}">Продавец</a>'
         ad_dict = dict(ad)
         ad_dict["is_promoted"] = 1
-        post_text = build_post_text(ad_dict, status="АКТУАЛЬНО", author_tag=tag, author_id=ad['user_id'])
-        pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
-        if not pairs and ad["channel"] and ad["message_id"]:
-            pairs = [f"{ad['channel']}:{ad['message_id']}"]
-        for pair in pairs:
-            pair = pair.strip()
+
+        async with aiosqlite.connect(DB_PATH) as db2:
+            async with db2.execute("SELECT verified FROM users WHERE user_id = ?", (ad['user_id'],)) as cur2:
+                u2 = await cur2.fetchone()
+            verified = bool(u2[0]) if u2 else False
+
+    post_text = build_post_text(ad_dict, status="АКТУАЛЬНО", author_tag=tag, author_id=ad['user_id'], verified=verified)
+    pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
+    if not pairs and ad["channel"] and ad["message_id"]:
+        pairs = [f"{ad['channel']}:{ad['message_id']}"]
+    for pair in pairs:
+        pair = pair.strip()
+        if ":" not in pair:
+            continue
             if ":" not in pair:
                 continue
             ch, mid = pair.rsplit(":", 1)
@@ -2338,6 +2418,43 @@ async def on_successful_payment(message: Message, state: FSMContext):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("UPDATE users SET verified = 1 WHERE user_id = ?", (user_id,))
             await db.commit()
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM listings WHERE user_id = ? AND status = 'ACTIVE'",
+                (user_id,)
+            ) as cur:
+                ads = await cur.fetchall()
+        for ad in ads:
+            try:
+                author = await bot.get_chat(ad['user_id'])
+                tag = make_author_tag(author.username, author.first_name, ad['user_id'])
+            except Exception:
+                tag = f'<a href="tg://user?id={ad["user_id"]}">Продавец</a>'
+            new_caption = build_post_text(ad, status="АКТУАЛЬНО", author_tag=tag, author_id=ad['user_id'], verified=True)
+            pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
+            if not pairs and ad["channel"] and ad["message_id"]:
+                pairs = [f"{ad['channel']}:{ad['message_id']}"]
+            for pair in pairs:
+                pair = pair.strip()
+                if ":" not in pair:
+                    continue
+                ch, mid = pair.rsplit(":", 1)
+                try:
+                    await bot.edit_message_caption(
+                        chat_id=ch, message_id=int(mid),
+                        caption=new_caption, parse_mode="HTML"
+                    )
+                except Exception:
+                    try:
+                        await bot.edit_message_text(
+                            chat_id=ch, message_id=int(mid),
+                            text=new_caption, parse_mode="HTML"
+                        )
+                    except Exception as e:
+                        print(f"Не удалось отредактировать {ch}/{mid}: {e}")
+            await db.commit()
         await message.answer("✅ Верификация подтверждена! В профиле появилась галочка.")
         try:
             await bot.send_message(
@@ -2374,7 +2491,13 @@ async def on_successful_payment(message: Message, state: FSMContext):
             tag = make_author_tag(author.username, author.first_name, user_id)
         except Exception:
             tag = f'<a href="tg://user?id={user_id}">Продавец</a>'
-        new_caption = build_post_text(ad, status="АКТУАЛЬНО", author_tag=tag, author_id=user_id)
+
+        async with aiosqlite.connect(DB_PATH) as db2:
+            async with db2.execute("SELECT verified FROM users WHERE user_id = ?", (user_id,)) as cur2:
+                u2 = await cur2.fetchone()
+            verified = bool(u2[0]) if u2 else False
+
+        new_caption = build_post_text(ad, status="АКТУАЛЬНО", author_tag=tag, author_id=user_id, verified=verified)
         pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
         if not pairs and ad["channel"] and ad["message_id"]:
             pairs = [f"{ad['channel']}:{ad['message_id']}"]
