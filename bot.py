@@ -83,6 +83,7 @@ async def init_db():
                 user_id INTEGER,
                 ad_type TEXT,
                 category TEXT,
+                subcategory TEXT,
                 model TEXT,
                 memory TEXT,
                 description TEXT,
@@ -100,29 +101,48 @@ async def init_db():
                 charge_id TEXT
             )
         """)
+        print("DEBUG: table listings created/exists")
+
         try:
             await db.execute("ALTER TABLE listings ADD COLUMN message_ids TEXT")
+            print("DEBUG: message_ids added")
         except sqlite3.OperationalError as e:
-            if "duplicate column name" not in str(e).lower():
+            if "duplicate column name" in str(e).lower():
+                print("DEBUG: message_ids exists")
+            else:
+                print(f"DEBUG: message_ids error: {e}")
                 raise
+
         try:
             await db.execute("ALTER TABLE listings ADD COLUMN charge_id TEXT")
+            print("DEBUG: charge_id added")
         except sqlite3.OperationalError as e:
-            if "duplicate column name" not in str(e).lower():
+            if "duplicate column name" in str(e).lower():
+                print("DEBUG: charge_id exists")
+            else:
+                print(f"DEBUG: charge_id error: {e}")
                 raise
+
         try:
             await db.execute("ALTER TABLE listings ADD COLUMN subcategory TEXT")
+            print("DEBUG: subcategory added")
         except sqlite3.OperationalError as e:
-            if "duplicate column name" not in str(e).lower():
+            if "duplicate column name" in str(e).lower():
+                print("DEBUG: subcategory exists")
+            else:
+                print(f"DEBUG: subcategory error: {e}")
                 raise
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 first_seen TIMESTAMP
             )
         """)
+        print("DEBUG: table users created/exists")
         await db.commit()
-
+        print("DEBUG: init_db finished")
+        
 async def save_listing(user_id, data, status='PENDING_MODERATION', is_trial=False):
     async with aiosqlite.connect(DB_PATH) as db:
         duration = timedelta(hours=24) if is_trial else timedelta(days=7)
