@@ -304,7 +304,7 @@ def build_post_text(ad, status="АКТУАЛЬНО", author_tag=None, author_id=
         tag = str(ad["user_id"])
 
     if verified:
-        tag = f"{tag} ✅"
+        tag = f"{tag} ✅ Проверенный продавец"
 
     safe_model = escape_html(ad["model"])
     safe_category = escape_html(ad["category"])
