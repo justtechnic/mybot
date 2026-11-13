@@ -1325,6 +1325,10 @@ async def approve_ad(callback: types.CallbackQuery):
                 if photos:
                     if len(photos) == 1:
                         sent = await bot.send_photo(chat_id=channel, photo=photos[0], caption=post_text, parse_mode="HTML")
+                        saved_pairs.append(f"{channel}:{sent.message_id}")
+                        if not first_channel:
+                            first_channel = channel
+                            first_message_id = sent.message_id
                     else:
                         media = []
                         for i, ph in enumerate(photos):
@@ -1333,32 +1337,20 @@ async def approve_ad(callback: types.CallbackQuery):
                             else:
                                 media.append(InputMediaPhoto(media=ph))
                         sent_msgs = await bot.send_media_group(chat_id=channel, media=media)
-                        sent = sent_msgs[0]
+                        # Сохраняем ВСЕ message_id альбома
+                        for sm in sent_msgs:
+                            saved_pairs.append(f"{channel}:{sm.message_id}")
+                        if not first_channel:
+                            first_channel = channel
+                            first_message_id = sent_msgs[0].message_id
                 else:
                     sent = await bot.send_message(chat_id=channel, text=post_text, parse_mode="HTML")
-                saved_pairs.append(f"{channel}:{sent.message_id}")
-                if not first_channel:
-                    first_channel = channel
-                    first_message_id = sent.message_id
+                    saved_pairs.append(f"{channel}:{sent.message_id}")
+                    if not first_channel:
+                        first_channel = channel
+                        first_message_id = sent.message_id
             except Exception as e:
                 print(f"Ошибка публикации: {e}")
-        await db.execute(
-            "UPDATE listings SET status = 'ACTIVE', channel = ?, message_id = ?, message_ids = ? WHERE id = ?",
-            (first_channel, first_message_id, ",".join(saved_pairs), lot_id)
-        )
-        await db.commit()
-    try:
-        await bot.send_message(
-            row['user_id'],
-            "Ваша публикация одобрена!👍",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🥷🏻 Мой профиль", callback_data="profile")],
-                [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
-            ])
-        )
-    except Exception:
-        pass
-
     # Уведомления подписчикам
     try:
         async with aiosqlite.connect(DB_PATH) as db:
@@ -1643,8 +1635,8 @@ async def cb_remove_ad(callback: types.CallbackQuery):
                     chat_id=ch, message_id=int(mid),
                     text=new_caption, parse_mode="HTML"
                 )
-            except Exception as e:
-                print(f"Не удалось отредактировать {ch}/{mid}: {e}")
+            except Exception:
+                pass
 
     try:
         await callback.message.edit_text("Объявление снято с продажи.")
