@@ -402,16 +402,12 @@ async def cb_pub_paid(callback: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("promote_"))
 async def cb_promote(callback: types.CallbackQuery, state: FSMContext):
-    lot_id = int(callback.data.split("_")[1])
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM listings WHERE id = ? AND user_id = ? AND status = 'ACTIVE'",
-            (lot_id, callback.from_user.id)
-        ) as cur:
-            ad = await cur.fetchone()
-    if not ad:
-        await callback.answer("Объявление не найдено.", show_alert=True)
+    # Пропускаем promote_stars и promote_donatepay — их ловят другие обработчики
+    if callback.data in ("promote_stars", "promote_donatepay", "promote_donatepay_done", "promote_back"):
+        return
+    try:
+        lot_id = int(callback.data.split("_")[1])
+    except (ValueError, IndexError):
         return
     await state.update_data(promote_lot_id=lot_id, paid_context="promote")
     await callback.message.edit_text(
