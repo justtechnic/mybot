@@ -110,6 +110,11 @@ async def init_db():
         except sqlite3.OperationalError as e:
             if "duplicate column name" not in str(e).lower():
                 raise
+        try:
+            await db.execute("ALTER TABLE listings ADD COLUMN subcategory TEXT")
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" not in str(e).lower():
+                raise
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -125,13 +130,13 @@ async def save_listing(user_id, data, status='PENDING_MODERATION', is_trial=Fals
         expires = (now + duration).isoformat()
         cursor = await db.execute("""
             INSERT INTO listings (
-                user_id, ad_type, category, model, memory, description,
+                user_id, ad_type, category, subcategory, model, memory, description,
                 price, city, delivery, photos, status, created_at,
                 expires_at, is_trial, charge_id
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            user_id, data.get('ad_type'), data.get('category'), data.get('model'),
+            user_id, data.get('ad_type'), data.get('category'), data.get('subcategory'), data.get('model'),
             data.get('memory'), data.get('description'), data.get('price'),
             data.get('city'), data.get('delivery'),
             ",".join(data.get('photos') or []),
@@ -240,10 +245,17 @@ def build_post_text(ad, status="АКТУАЛЬНО", author_tag=None, author_id=
     safe_delivery = escape_html(ad["delivery"])
     safe_memory = escape_html(ad["memory"]) if ad["memory"] and ad["memory"] != "—" else None
 
-    text = f"{header}\n#{safe_category}\n#{safe_city}\n\n"
+    subcat = None
+    try:
+        subcat = ad["subcategory"]
+    except (KeyError, IndexError):
+        pass
+
+    text = f"{header}\n#{safe_category}\n"
+    if subcat:
+        text += f"#{escape_html(subcat)}\n"
+    text += f"#{safe_city}\n\n"
     text += f"📦 {safe_model}\n\n"
-    if ad.get("subcategory"):
-        text += f"🔹 {escape_html(ad['subcategory'])}\n\n"
     if safe_memory:
         text += f"💾Память: {safe_memory}\n\n"
     text += (
