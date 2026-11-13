@@ -405,36 +405,6 @@ async def cb_free_continue(callback: types.CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-@dp.callback_query(F.data.startswith("promote_lot_"))
-async def cb_promote(callback: types.CallbackQuery, state: FSMContext):
-    parts = callback.data.split("_")
-    if len(parts) < 3 or not parts[2].isdigit():
-        return
-    lot_id = int(parts[2])
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM listings WHERE id = ? AND user_id = ? AND status = 'ACTIVE'",
-            (lot_id, callback.from_user.id)
-        ) as cur:
-            ad = await cur.fetchone()
-    if not ad:
-        await callback.answer("Объявление не найдено.", show_alert=True)
-        return
-    await state.update_data(promote_lot_id=lot_id, paid_context="promote")
-    await callback.message.edit_text(
-        "🚀 <b>Поднятие объявления в топ</b>\n\n"
-        "Объявление будет закреплено в канале на 7 дней с пометкой 🔥 ТОП.\n\n"
-        "Выберите способ оплаты:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="25⭐️", callback_data="promote_pay_stars")],
-            [InlineKeyboardButton(text="25💸", callback_data="promote_pay_donatepay")],
-            [InlineKeyboardButton(text="↩️ Назад", callback_data="main_menu")]
-        ]),
-        parse_mode="HTML"
-    )
-    await callback.answer()
-
 
 @dp.callback_query(F.data == "promote_pay_stars")
 async def cb_promote_stars(callback: types.CallbackQuery, state: FSMContext):
@@ -504,27 +474,6 @@ async def cb_promote(callback: types.CallbackQuery, state: FSMContext):
         ]),
         parse_mode="HTML"
     )
-    await callback.answer()
-
-@dp.callback_query(F.data == "promote_lot_back")
-async def cb_promote_back(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    lot_id = data.get("promote_lot_id")
-    if lot_id:
-        await state.update_data(paid_context="promote")
-        await callback.message.edit_text(
-            "🚀 <b>Поднятие объявления в топ</b>\n\n"
-            "Объявление будет закреплено в канале на 7 дней с пометкой 🔥 ТОП.\n\n"
-            "Выберите способ оплаты:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="25⭐️", callback_data="promote_pay_stars")],
-                [InlineKeyboardButton(text="25💸", callback_data="promote_pay_donatepay")],
-                [InlineKeyboardButton(text="↩️ Назад", callback_data="main_menu")]
-            ]),
-            parse_mode="HTML"
-        )
-    else:
-        await callback.message.edit_text("Объявление не найдено.")
     await callback.answer()
 
 
@@ -609,8 +558,8 @@ async def cb_promote_back(callback: types.CallbackQuery, state: FSMContext):
             "Объявление будет закреплено в канале на 7 дней с пометкой 🔥 ТОП.\n\n"
             "Выберите способ оплаты:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="25⭐️", callback_data="promote_stars")],
-                [InlineKeyboardButton(text="25💸", callback_data="promote_donatepay")],
+                [InlineKeyboardButton(text="25⭐️", callback_data="promote_pay_stars")],
+                [InlineKeyboardButton(text="25💸", callback_data="promote_pay_donatepay")],
                 [InlineKeyboardButton(text="↩️ Назад", callback_data="main_menu")]
             ]),
             parse_mode="HTML"
