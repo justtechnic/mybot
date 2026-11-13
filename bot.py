@@ -873,6 +873,10 @@ async def photos_done(callback: types.CallbackQuery, state: FSMContext):
         f"Проверь текст и вложения на наличие ошибок. Если все нормально - отправь на модерацию.\n\n"
         f"✅АКТУАЛЬНО✅\n"
         f"#{data['category']}\n"
+    )
+    if data.get('subcategory'):
+        preview_text += f"#{data['subcategory']}\n"
+    preview_text += (
         f"#{data['city']}\n\n"
         f"📦 {data['model']}\n\n"
     )
