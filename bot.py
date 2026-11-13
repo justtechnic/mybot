@@ -142,7 +142,7 @@ async def init_db():
         print("DEBUG: table users created/exists")
         await db.commit()
         print("DEBUG: init_db finished")
-        
+
 async def save_listing(user_id, data, status='PENDING_MODERATION', is_trial=False):
     async with aiosqlite.connect(DB_PATH) as db:
         duration = timedelta(hours=24) if is_trial else timedelta(days=7)
@@ -934,6 +934,7 @@ async def back_to_photos(callback: types.CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data == "send_moderation", AdForm.preview)
 async def send_moderation(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
+    print(f"DEBUG: send_moderation data = {data}")   # <-- добавить эту строку
     if data.get("moderation_sent"):
         await callback.answer("Объявление уже отправлено на модерацию.", show_alert=True)
         return
