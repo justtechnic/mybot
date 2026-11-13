@@ -98,7 +98,9 @@ async def init_db():
                 channel TEXT,
                 message_id INTEGER,
                 message_ids TEXT,
-                charge_id TEXT
+                charge_id TEXT,
+                is_promoted INTEGER DEFAULT 0,
+                promoted_until TIMESTAMP
             )
         """)
         print("DEBUG: table listings created/exists")
@@ -131,6 +133,26 @@ async def init_db():
                 print("DEBUG: subcategory exists")
             else:
                 print(f"DEBUG: subcategory error: {e}")
+                raise
+
+        try:
+            await db.execute("ALTER TABLE listings ADD COLUMN is_promoted INTEGER DEFAULT 0")
+            print("DEBUG: is_promoted added")
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e).lower():
+                print("DEBUG: is_promoted exists")
+            else:
+                print(f"DEBUG: is_promoted error: {e}")
+                raise
+
+        try:
+            await db.execute("ALTER TABLE listings ADD COLUMN promoted_until TIMESTAMP")
+            print("DEBUG: promoted_until added")
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e).lower():
+                print("DEBUG: promoted_until exists")
+            else:
+                print(f"DEBUG: promoted_until error: {e}")
                 raise
 
         await db.execute("""
@@ -249,6 +271,14 @@ def build_post_text(ad, status="АКТУАЛЬНО", author_tag=None, author_id=
         header = "❌ПРОДАНО❌"
     else:
         header = "✅АКТУАЛЬНО✅"
+
+        is_promoted = False
+    try:
+        is_promoted = bool(ad["is_promoted"])
+    except (KeyError, IndexError):
+        pass
+    if is_promoted and status != "ПРОДАНО":
+        header = "🔥 ТОП\n" + header
 
     if author_tag:
         tag = author_tag
@@ -370,6 +400,234 @@ async def cb_pub_paid(callback: types.CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
+@dp.callback_query(F.data.startswith("promote_"))
+async def cb_promote(callback: types.CallbackQuery, state: FSMContext):
+    lot_id = int(callback.data.split("_")[1])
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM listings WHERE id = ? AND user_id = ? AND status = 'ACTIVE'",
+            (lot_id, callback.from_user.id)
+        ) as cur:
+            ad = await cur.fetchone()
+    if not ad:
+        await callback.answer("Объявление не найдено.", show_alert=True)
+        return
+    await state.update_data(promote_lot_id=lot_id, paid_context="promote")
+    await callback.message.edit_text(
+        "🚀 <b>Поднятие объявления в топ</b>\n\n"
+        "Объявление будет закреплено в канале на 7 дней с пометкой 🔥 ТОП.\n\n"
+        "Выберите способ оплаты:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="25⭐️", callback_data="promote_stars")],
+            [InlineKeyboardButton(text="25💸", callback_data="promote_donatepay")],
+            [InlineKeyboardButton(text="↩️ Назад", callback_data="main_menu")]
+        ]),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "promote_stars")
+async def cb_promote_stars(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    lot_id = data.get("promote_lot_id")
+    if not lot_id:
+        await callback.answer("Объявление не найдено.", show_alert=True)
+        return
+    await bot.send_invoice(
+        chat_id=callback.from_user.id,
+        title="Поднятие объявления в топ",
+        description="Закрепление в канале на 7 дней + пометка ТОП",
+        payload=f"promote_{lot_id}_{callback.from_user.id}",
+        currency="XTR",
+        prices=[LabeledPrice(label="XTR", amount=25)],
+        provider_token=""
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "promote_donatepay")
+async def cb_promote_donatepay(callback: types.CallbackQuery, state: FSMContext):
+    await state.update_data(donatepay_pending=False)
+    text = (
+        "⚠️ Бот не может автоматически проверить пожертвование, поэтому его проверяет "
+        "Владелец бота @JustTechnic1. Для поднятия в топ потребуется:\n\n"
+        "1) Отправить донат по ссылке ниже\n"
+        "2) В строке имя укажите ваш никнейм/юзернейм\n"
+        "3) После оплаты нажмите «✅ Готово» — админ проверит поступление и подтвердит.\n\n"
+        "Обычно проверка занимает несколько минут."
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💸 Перейти к оплате", url=DONATEPAY_PAGE_URL)],
+            [InlineKeyboardButton(text="✅ Готово", callback_data="promote_donatepay_done")],
+            [InlineKeyboardButton(text="↩️ Назад", callback_data="promote_back")]
+        ])
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "promote_back")
+async def cb_promote_back(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    lot_id = data.get("promote_lot_id")
+    if lot_id:
+        await state.update_data(paid_context="promote")
+        await callback.message.edit_text(
+            "🚀 <b>Поднятие объявления в топ</b>\n\n"
+            "Объявление будет закреплено в канале на 7 дней с пометкой 🔥 ТОП.\n\n"
+            "Выберите способ оплаты:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="25⭐️", callback_data="promote_stars")],
+                [InlineKeyboardButton(text="25💸", callback_data="promote_donatepay")],
+                [InlineKeyboardButton(text="↩️ Назад", callback_data="main_menu")]
+            ]),
+            parse_mode="HTML"
+        )
+    else:
+        await callback.message.edit_text("Объявление не найдено.")
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "promote_donatepay_done")
+async def cb_promote_donatepay_done(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    if data.get("donatepay_pending"):
+        await callback.answer("Заявка уже отправлена, ожидайте проверки.", show_alert=True)
+        return
+    lot_id = data.get("promote_lot_id")
+    if not lot_id:
+        await callback.answer("Объявление не найдено.", show_alert=True)
+        return
+    username = callback.from_user.username
+    username_str = f"@{username}" if username else "нет username"
+    first_name = escape_html(callback.from_user.first_name or "")
+    text = (
+        f"💰 <b>Заявка на подтверждение DonatePay (ТОП)</b>\n\n"
+        f"Пользователь: {first_name} ({username_str})\n"
+        f"Telegram ID: <code>{callback.from_user.id}</code>\n"
+        f"Объявление #{lot_id}\n\n"
+        f"Сверьте никнейм с полем «Имя» в кабинете DonatePay.\n"
+        f"Проверьте поступление 25₽ и подтвердите."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="✅ Подтвердить",
+            callback_data=f"dp_promote_confirm_{callback.from_user.id}_{lot_id}"
+        )],
+        [InlineKeyboardButton(
+            text="❌ Отклонить",
+            callback_data=f"dp_reject_{callback.from_user.id}"
+        )]
+    ])
+    try:
+        await bot.send_message(chat_id=ADMIN_ID, text=text, reply_markup=kb, parse_mode="HTML")
+    except Exception as e:
+        print(f"Не удалось отправить заявку админу: {e}")
+        await callback.answer("Ошибка, напишите в поддержку.", show_alert=True)
+        return
+    await state.update_data(donatepay_pending=True)
+    try:
+        await callback.message.edit_text(
+            "✅ Заявка отправлена админу. Как только оплата подтвердится — объявление будет закреплено.",
+            reply_markup=None
+        )
+    except Exception:
+        await callback.message.answer(
+            "✅ Заявка отправлена админу. Как только оплата подтвердится — объявление будет закреплено."
+        )
+    await callback.answer()
+
+@dp.callback_query(F.data == "promote_stars")
+async def cb_promote_stars(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    lot_id = data.get("promote_lot_id")
+    if not lot_id:
+        await callback.answer("Объявление не найдено.", show_alert=True)
+        return
+    await bot.send_invoice(
+        chat_id=callback.from_user.id,
+        title="Поднятие объявления в топ",
+        description="Закрепление в канале на 7 дней + пометка ТОП",
+        payload=f"promote_{lot_id}_{callback.from_user.id}",
+        currency="XTR",
+        prices=[LabeledPrice(label="XTR", amount=25)],
+        provider_token=""
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "promote_donatepay")
+async def cb_promote_donatepay(callback: types.CallbackQuery, state: FSMContext):
+    await state.update_data(donatepay_pending=False)
+    text = (
+        "⚠️ Бот не может автоматически проверить пожертвование, поэтому его проверяет "
+        "Владелец бота @JustTechnic1. Для поднятия в топ потребуется:\n\n"
+        "1) Отправить донат по ссылке ниже\n"
+        "2) В строке имя укажите ваш никнейм/юзернейм\n"
+        "3) После оплаты нажмите «✅ Готово» — админ проверит поступление и подтвердит.\n\n"
+        "Обычно проверка занимает несколько минут."
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💸 Перейти к оплате", url=DONATEPAY_PAGE_URL)],
+            [InlineKeyboardButton(text="✅ Готово", callback_data="promote_donatepay_done")],
+            [InlineKeyboardButton(text="↩️ Назад", callback_data="promote_back")]
+        ])
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "promote_donatepay_done")
+async def cb_promote_donatepay_done(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    if data.get("donatepay_pending"):
+        await callback.answer("Заявка уже отправлена, ожидайте проверки.", show_alert=True)
+        return
+    lot_id = data.get("promote_lot_id")
+    if not lot_id:
+        await callback.answer("Объявление не найдено.", show_alert=True)
+        return
+    username = callback.from_user.username
+    username_str = f"@{username}" if username else "нет username"
+    first_name = escape_html(callback.from_user.first_name or "")
+    text = (
+        f"💰 <b>Заявка на подтверждение DonatePay (ТОП)</b>\n\n"
+        f"Пользователь: {first_name} ({username_str})\n"
+        f"Telegram ID: <code>{callback.from_user.id}</code>\n"
+        f"Объявление #{lot_id}\n\n"
+        f"Сверьте никнейм с полем «Имя» в кабинете DonatePay.\n"
+        f"Проверьте поступление 25₽ и подтвердите."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="✅ Подтвердить",
+            callback_data=f"dp_promote_confirm_{callback.from_user.id}_{lot_id}"
+        )],
+        [InlineKeyboardButton(
+            text="❌ Отклонить",
+            callback_data=f"dp_reject_{callback.from_user.id}"
+        )]
+    ])
+    try:
+        await bot.send_message(chat_id=ADMIN_ID, text=text, reply_markup=kb, parse_mode="HTML")
+    except Exception as e:
+        print(f"Не удалось отправить заявку админу: {e}")
+        await callback.answer("Ошибка, напишите в поддержку.", show_alert=True)
+        return
+    await state.update_data(donatepay_pending=True)
+    try:
+        await callback.message.edit_text(
+            "✅ Заявка отправлена админу. Как только оплата подтвердится — объявление будет закреплено.",
+            reply_markup=None
+        )
+    except Exception:
+        await callback.message.answer(
+            "✅ Заявка отправлена админу. Как только оплата подтвердится — объявление будет закреплено."
+        )
+    await callback.answer()
+
 @dp.callback_query(F.data == "pay_stars")
 async def cb_pay_stars(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -481,6 +739,79 @@ async def cb_dp_confirm(callback: types.CallbackQuery):
     user_id = int(parts[2])
     context = parts[3]
     lot_id = int(parts[4])
+
+@dp.callback_query(F.data.startswith("dp_promote_confirm_"))
+async def cb_dp_promote_confirm(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    parts = callback.data.split("_")
+    user_id = int(parts[3])
+    lot_id = int(parts[4])
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM listings WHERE id = ?", (lot_id,)) as cur:
+            ad = await cur.fetchone()
+    if not ad:
+        await callback.answer("Объявление не найдено.", show_alert=True)
+        return
+    promoted_until = (datetime.now() + timedelta(days=7)).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE listings SET is_promoted = 1, promoted_until = ? WHERE id = ?",
+            (promoted_until, lot_id)
+        )
+        await db.commit()
+    try:
+        author = await bot.get_chat(user_id)
+        tag = make_author_tag(author.username, author.first_name, user_id)
+    except Exception:
+        tag = f'<a href="tg://user?id={user_id}">Продавец</a>'
+    ad_dict = dict(ad)
+    ad_dict["is_promoted"] = 1
+    post_text = build_post_text(ad_dict, status="АКТУАЛЬНО", author_tag=tag, author_id=user_id)
+    pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
+    if not pairs and ad["channel"] and ad["message_id"]:
+        pairs = [f"{ad['channel']}:{ad['message_id']}"]
+    for pair in pairs:
+        pair = pair.strip()
+        if ":" not in pair:
+            continue
+        ch, mid = pair.rsplit(":", 1)
+        try:
+            await bot.edit_message_caption(
+                chat_id=ch, message_id=int(mid),
+                caption=post_text, parse_mode="HTML"
+            )
+        except Exception:
+            try:
+                await bot.edit_message_text(
+                    chat_id=ch, message_id=int(mid),
+                    text=post_text, parse_mode="HTML"
+                )
+            except Exception as e:
+                print(f"Не удалось отредактировать {ch}/{mid}: {e}")
+        try:
+            await bot.pin_chat_message(
+                chat_id=ch, message_id=int(mid),
+                disable_notification=True
+            )
+        except Exception as e:
+            print(f"Не удалось закрепить {ch}/{mid}: {e}")
+    try:
+        await bot.send_message(
+            user_id,
+            "✅ Оплата подтверждена! Объявление закреплено в топе на 7 дней."
+        )
+    except Exception:
+        pass
+    try:
+        await callback.message.edit_text(
+            callback.message.text + "\n\n✅ Подтверждено"
+        )
+    except Exception:
+        pass
+    await callback.answer("Подтверждено")
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -1183,8 +1514,17 @@ async def _send_my_ads(target_message: types.Message, user_id: int):
             text=f"{ad['model']} ({price} руб.)",
             callback_data=f"lot_{ad['id']}"
         )])
+        promoted = False
+        try:
+            promoted = bool(ad["is_promoted"])
+        except (KeyError, IndexError):
+            pass
+        if not promoted:
+            kb.append([InlineKeyboardButton(
+                text=f"🚀 Поднять в топ #{ad['id']} (25 ⭐️)",
+                callback_data=f"promote_{ad['id']}"
+            )])
     kb.append([InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")])
-
     await target_message.answer(
         f"📃 Мои объявления\n{len(ads)} в канале\n\n"
         f"{lines}\n\n"
@@ -1539,6 +1879,74 @@ async def backup_loop():
             print(f"Ошибка бэкапа: {e}")
         await asyncio.sleep(3600)
 
+async def unpin_loop():
+    while True:
+        try:
+            now = datetime.now().isoformat()
+            async with aiosqlite.connect(DB_PATH) as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT * FROM listings WHERE is_promoted = 1 AND promoted_until IS NOT NULL AND promoted_until <= ?",
+                    (now,)
+                ) as cur:
+                    expired = await cur.fetchall()
+
+            for ad in expired:
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute(
+                        "UPDATE listings SET is_promoted = 0, promoted_until = NULL WHERE id = ?",
+                        (ad["id"],)
+                    )
+                    await db.commit()
+
+                try:
+                    author = await bot.get_chat(ad['user_id'])
+                    tag = make_author_tag(author.username, author.first_name, ad['user_id'])
+                except Exception:
+                    tag = f'<a href="tg://user?id={ad["user_id"]}">Продавец</a>'
+
+                ad_dict = dict(ad)
+                ad_dict["is_promoted"] = 0
+                new_caption = build_post_text(ad_dict, status="АКТУАЛЬНО", author_tag=tag, author_id=ad['user_id'])
+
+                pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
+                if not pairs and ad["channel"] and ad["message_id"]:
+                    pairs = [f"{ad['channel']}:{ad['message_id']}"]
+                for pair in pairs:
+                    pair = pair.strip()
+                    if ":" not in pair:
+                        continue
+                    ch, mid = pair.rsplit(":", 1)
+                    try:
+                        await bot.unpin_chat_message(chat_id=ch, message_id=int(mid))
+                    except Exception as e:
+                        print(f"Не удалось открепить {ch}/{mid}: {e}")
+                    try:
+                        await bot.edit_message_caption(
+                            chat_id=ch, message_id=int(mid),
+                            caption=new_caption, parse_mode="HTML"
+                        )
+                    except Exception:
+                        try:
+                            await bot.edit_message_text(
+                                chat_id=ch, message_id=int(mid),
+                                text=new_caption, parse_mode="HTML"
+                            )
+                        except Exception as e:
+                            print(f"Не удалось отредактировать {ch}/{mid}: {e}")
+
+                try:
+                    await bot.send_message(
+                        ad["user_id"],
+                        f"⏰ Срок закрепа объявления «{ad['model']}» истёк. Пометка 🔥 ТОП убрана. "
+                        f"Вы можете снова поднять его в топ за 25 ⭐️."
+                    )
+                except Exception as e:
+                    print(f"Не удалось уведомить {ad['user_id']}: {e}")
+        except Exception as e:
+            print(f"Ошибка в unpin_loop: {e}")
+        await asyncio.sleep(60)
+
 @dp.pre_checkout_query()
 async def pre_checkout(query: PreCheckoutQuery):
     await query.answer(ok=True)
@@ -1549,6 +1957,76 @@ async def on_successful_payment(message: Message, state: FSMContext):
     payload = payment.invoice_payload
     charge_id = payment.telegram_payment_charge_id
     user_id = message.from_user.id
+    
+    if payload.startswith("promote_"):
+        parts = payload.split("_")
+        lot_id = int(parts[1])
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM listings WHERE id = ?", (lot_id,)) as cur:
+                ad = await cur.fetchone()
+        if not ad:
+            await message.answer("Объявление не найдено, но оплата получена. Напишите в поддержку.")
+            return
+        promoted_until = (datetime.now() + timedelta(days=7)).isoformat()
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE listings SET is_promoted = 1, promoted_until = ? WHERE id = ?",
+                (promoted_until, lot_id)
+            )
+            await db.commit()
+        try:
+            author = await bot.get_chat(ad['user_id'])
+            tag = make_author_tag(author.username, author.first_name, ad['user_id'])
+        except Exception:
+            tag = f'<a href="tg://user?id={ad["user_id"]}">Продавец</a>'
+        ad_dict = dict(ad)
+        ad_dict["is_promoted"] = 1
+        post_text = build_post_text(ad_dict, status="АКТУАЛЬНО", author_tag=tag, author_id=ad['user_id'])
+        pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
+        if not pairs and ad["channel"] and ad["message_id"]:
+            pairs = [f"{ad['channel']}:{ad['message_id']}"]
+        for pair in pairs:
+            pair = pair.strip()
+            if ":" not in pair:
+                continue
+            ch, mid = pair.rsplit(":", 1)
+            try:
+                await bot.edit_message_caption(
+                    chat_id=ch, message_id=int(mid),
+                    caption=post_text, parse_mode="HTML"
+                )
+            except Exception:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=ch, message_id=int(mid),
+                        text=post_text, parse_mode="HTML"
+                    )
+                except Exception as e:
+                    print(f"Не удалось отредактировать {ch}/{mid}: {e}")
+            try:
+                await bot.pin_chat_message(
+                    chat_id=ch, message_id=int(mid),
+                    disable_notification=True
+                )
+            except Exception as e:
+                print(f"Не удалось закрепить {ch}/{mid}: {e}")
+        await message.answer("✅ Оплата получена! Объявление закреплено в топе на 7 дней.")
+        try:
+            await bot.send_message(
+                ADMIN_ID,
+                f"🚀 <b>Продвижение (Stars)</b>\n\n"
+                f"Пользователь: {escape_html(message.from_user.first_name)}\n"
+                f"ID: <code>{ad['user_id']}</code>\n"
+                f"Объявление #{lot_id}: {escape_html(ad['model'])}\n"
+                f"Сумма: 25 ⭐️\n"
+                f"Закреп до: {promoted_until[:10]}",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+        await state.clear()
+        return
 
     if payload.startswith("renew_"):
         parts = payload.split("_")
