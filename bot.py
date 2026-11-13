@@ -405,34 +405,9 @@ async def cb_free_continue(callback: types.CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-
-@dp.callback_query(F.data == "pub_paid")
-async def cb_pub_paid(callback: types.CallbackQuery, state: FSMContext):
-    await state.update_data(paid_context="new", moderation_sent=False)
-    await callback.message.edit_text(
-        "Отлично! Ваше объявление будет выставлено на 7 дней с публикацией "
-        "в истории у Владельца, после окончания срока объявление будет снято "
-        "с продажи, но его можно будет продлить, если потребуется.\n\n"
-        "Выберите способ оплаты:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="25⭐️", callback_data="pay_stars")],
-            [InlineKeyboardButton(text="25💸", callback_data="pay_donatepay")],
-            [InlineKeyboardButton(text="↩️ Назад", callback_data="publish")]
-        ])
-    )
-    await callback.answer()
-
-
-# ---------- ПРОДВИЖЕНИЕ (ТОП) ----------
-
-@dp.callback_query(F.data.startswith("promote_"))
+@dp.callback_query(F.data.startswith("promote_lot_"))
 async def cb_promote(callback: types.CallbackQuery, state: FSMContext):
-    if callback.data in ("promote_stars", "promote_donatepay", "promote_donatepay_done", "promote_back"):
-        return
-    parts = callback.data.split("_")
-    if len(parts) < 2 or not parts[1].isdigit():
-        return
-    lot_id = int(parts[1])
+    lot_id = int(callback.data.split("_")[2])
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -449,8 +424,8 @@ async def cb_promote(callback: types.CallbackQuery, state: FSMContext):
         "Объявление будет закреплено в канале на 7 дней с пометкой 🔥 ТОП.\n\n"
         "Выберите способ оплаты:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="25⭐️", callback_data="promote_stars")],
-            [InlineKeyboardButton(text="25💸", callback_data="promote_donatepay")],
+            [InlineKeyboardButton(text="25⭐️", callback_data="promote_pay_stars")],
+            [InlineKeyboardButton(text="25💸", callback_data="promote_pay_donatepay")],
             [InlineKeyboardButton(text="↩️ Назад", callback_data="main_menu")]
         ]),
         parse_mode="HTML"
@@ -458,7 +433,7 @@ async def cb_promote(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@dp.callback_query(F.data == "promote_stars")
+@dp.callback_query(F.data == "promote_pay_stars")
 async def cb_promote_stars(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     lot_id = data.get("promote_lot_id")
@@ -477,7 +452,7 @@ async def cb_promote_stars(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@dp.callback_query(F.data == "promote_donatepay")
+@dp.callback_query(F.data == "promote_pay_donatepay")
 async def cb_promote_donatepay(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(donatepay_pending=False)
     text = (
@@ -493,13 +468,13 @@ async def cb_promote_donatepay(callback: types.CallbackQuery, state: FSMContext)
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="💸 Перейти к оплате", url=DONATEPAY_PAGE_URL)],
             [InlineKeyboardButton(text="✅ Готово", callback_data="promote_donatepay_done")],
-            [InlineKeyboardButton(text="↩️ Назад", callback_data="promote_back")]
+            [InlineKeyboardButton(text="↩️ Назад", callback_data="promote_lot_back")]
         ])
     )
     await callback.answer()
 
 
-@dp.callback_query(F.data == "promote_back")
+@dp.callback_query(F.data == "promote_lot_back")
 async def cb_promote_back(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     lot_id = data.get("promote_lot_id")
@@ -510,8 +485,8 @@ async def cb_promote_back(callback: types.CallbackQuery, state: FSMContext):
             "Объявление будет закреплено в канале на 7 дней с пометкой 🔥 ТОП.\n\n"
             "Выберите способ оплаты:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="25⭐️", callback_data="promote_stars")],
-                [InlineKeyboardButton(text="25💸", callback_data="promote_donatepay")],
+                [InlineKeyboardButton(text="25⭐️", callback_data="promote_pay_stars")],
+                [InlineKeyboardButton(text="25💸", callback_data="promote_pay_donatepay")],
                 [InlineKeyboardButton(text="↩️ Назад", callback_data="main_menu")]
             ]),
             parse_mode="HTML"
@@ -570,6 +545,47 @@ async def cb_promote_donatepay_done(callback: types.CallbackQuery, state: FSMCon
         )
     await callback.answer()
 
+@dp.callback_query(F.data == "pub_paid")
+async def cb_pub_paid(callback: types.CallbackQuery, state: FSMContext):
+    await state.update_data(paid_context="new", moderation_sent=False)
+    await callback.message.edit_text(
+        "Отлично! Ваше объявление будет выставлено на 7 дней с публикацией "
+        "в истории у Владельца, после окончания срока объявление будет снято "
+        "с продажи, но его можно будет продлить, если потребуется.\n\n"
+        "Выберите способ оплаты:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="25⭐️", callback_data="pay_stars")],
+            [InlineKeyboardButton(text="25💸", callback_data="pay_donatepay")],
+            [InlineKeyboardButton(text="↩️ Назад", callback_data="publish")]
+        ])
+    )
+    await callback.answer()
+
+
+# ---------- ПРОДВИЖЕНИЕ (ТОП) ----------
+
+
+
+@dp.callback_query(F.data == "promote_back")
+async def cb_promote_back(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    lot_id = data.get("promote_lot_id")
+    if lot_id:
+        await state.update_data(paid_context="promote")
+        await callback.message.edit_text(
+            "🚀 <b>Поднятие объявления в топ</b>\n\n"
+            "Объявление будет закреплено в канале на 7 дней с пометкой 🔥 ТОП.\n\n"
+            "Выберите способ оплаты:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="25⭐️", callback_data="promote_stars")],
+                [InlineKeyboardButton(text="25💸", callback_data="promote_donatepay")],
+                [InlineKeyboardButton(text="↩️ Назад", callback_data="main_menu")]
+            ]),
+            parse_mode="HTML"
+        )
+    else:
+        await callback.message.edit_text("Объявление не найдено.")
+    await callback.answer()
 
 # ---------- ОПЛАТА ЗВЁЗДАМИ / DONATEPAY ----------
 
@@ -1509,7 +1525,7 @@ async def _send_my_ads(target_message: types.Message, user_id: int):
         if not promoted:
             kb.append([InlineKeyboardButton(
                 text=f"🚀 Поднять в топ #{ad['id']} (25 ⭐️)",
-                callback_data=f"promote_{ad['id']}"
+                callback_data=f"promote_lot_{ad['id']}"
             )])
     kb.append([InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")])
     await target_message.answer(
