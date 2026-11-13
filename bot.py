@@ -2064,6 +2064,27 @@ async def cmd_stats(message: types.Message):
     )
     await message.answer(text, parse_mode="HTML")
 
+@dp.message(Command("check_ads"))
+async def cmd_check_ads(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, model, status, channel, message_id, message_ids FROM listings ORDER BY id DESC LIMIT 30"
+        ) as cur:
+            rows = await cur.fetchall()
+    if not rows:
+        await message.answer("Объявлений нет.")
+        return
+    lines = []
+    for r in rows:
+        model = (r["model"] or "")[:30]
+        lines.append(
+            f"#{r['id']} | {model} | {r['status']} | {r['channel']} | {r['message_id']}"
+        )
+    await message.answer("<pre>" + "\n".join(lines) + "</pre>", parse_mode="HTML")
+
 
 @dp.message(Command("dbinfo"))
 async def cmd_dbinfo(message: types.Message):
