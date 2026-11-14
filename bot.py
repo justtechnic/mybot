@@ -114,8 +114,7 @@ async def init_db():
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
-                first_seen TIMESTAMP,
-                verified INTEGER DEFAULT 0
+                first_seen TIMESTAMP, verified INTEGER DEFAULT 0
             )
         """)
         await db.execute("""
@@ -124,41 +123,46 @@ async def init_db():
                 user_id INTEGER NOT NULL, keyword TEXT NOT NULL, created_at TIMESTAMP
             )
         """)
-
-        # Принудительные миграции — добавляем ВСЕ возможные колонки,
-        # ошибки "duplicate column" игнорируем
-        migrations = [
-            "ALTER TABLE listings ADD COLUMN subcategory TEXT",
-            "ALTER TABLE listings ADD COLUMN message_ids TEXT",
-            "ALTER TABLE listings ADD COLUMN charge_id TEXT",
-            "ALTER TABLE listings ADD COLUMN is_promoted INTEGER DEFAULT 0",
-            "ALTER TABLE listings ADD COLUMN promoted_until TIMESTAMP",
-            "ALTER TABLE listings ADD COLUMN seller_verified INTEGER DEFAULT 0",
-            "ALTER TABLE listings ADD COLUMN ad_type TEXT",
-            "ALTER TABLE listings ADD COLUMN model TEXT",
-            "ALTER TABLE listings ADD COLUMN memory TEXT",
-            "ALTER TABLE listings ADD COLUMN description TEXT",
-            "ALTER TABLE listings ADD COLUMN price TEXT",
-            "ALTER TABLE listings ADD COLUMN city TEXT",
-            "ALTER TABLE listings ADD COLUMN delivery TEXT",
-            "ALTER TABLE listings ADD COLUMN photos TEXT",
-            "ALTER TABLE listings ADD COLUMN status TEXT DEFAULT 'DRAFT'",
-            "ALTER TABLE listings ADD COLUMN created_at TIMESTAMP",
-            "ALTER TABLE listings ADD COLUMN expires_at TIMESTAMP",
-            "ALTER TABLE listings ADD COLUMN is_trial BOOLEAN DEFAULT 0",
-            "ALTER TABLE listings ADD COLUMN channel TEXT",
-            "ALTER TABLE listings ADD COLUMN message_id INTEGER",
-            "ALTER TABLE users ADD COLUMN verified INTEGER DEFAULT 0",
-        ]
-        for ddl in migrations:
-            try:
-                await db.execute(ddl)
-            except sqlite3.OperationalError as e:
-                if "duplicate column name" not in str(e).lower():
-                    print(f"DEBUG: {ddl} -> {e}")
-
         await db.commit()
-        print("DEBUG: init_db finished, migrations applied")
+
+        async with db.execute("PRAGMA table_info(listings)") as cur:
+            existing = {row[1] for row in await cur.fetchall()}
+        print(f"DEBUG: existing listings cols: {sorted(existing)}")
+
+        required = {
+            "subcategory": "TEXT", "message_ids": "TEXT", "charge_id": "TEXT",
+            "is_promoted": "INTEGER DEFAULT 0", "promoted_until": "TIMESTAMP",
+            "seller_verified": "INTEGER DEFAULT 0",
+            "ad_type": "TEXT", "model": "TEXT", "memory": "TEXT",
+            "description": "TEXT", "price": "TEXT", "city": "TEXT",
+            "delivery": "TEXT", "photos": "TEXT", "status": "TEXT DEFAULT 'DRAFT'",
+            "created_at": "TIMESTAMP", "expires_at": "TIMESTAMP",
+            "is_trial": "BOOLEAN DEFAULT 0", "channel": "TEXT", "message_id": "INTEGER",
+        }
+        added = []
+        for col, coltype in required.items():
+            if col not in existing:
+                try:
+                    await db.execute(f"ALTER TABLE listings ADD COLUMN {col} {coltype}")
+                    await db.commit()
+                    added.append(col)
+                    print(f"DEBUG: added listings.{col}")
+                except sqlite3.OperationalError as e:
+                    print(f"DEBUG: ALTER {col} failed: {e}")
+        if added:
+            print(f"DEBUG: init_db: added columns = {added}")
+
+        async with db.execute("PRAGMA table_info(users)") as cur:
+            ucols = {row[1] for row in await cur.fetchall()}
+        if "verified" not in ucols:
+            try:
+                await db.execute("ALTER TABLE users ADD COLUMN verified INTEGER DEFAULT 0")
+                await db.commit()
+                print("DEBUG: added users.verified")
+            except sqlite3.OperationalError:
+                pass
+
+        print("DEBUG: init_db finished")
 
 async def save_listing(user_id, data, status='PENDING_MODERATION', is_trial=False):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -2386,16 +2390,33 @@ async def process_restore_file(message: types.Message, state: FSMContext):
     try:
         file = await bot.get_file(message.document.file_id)
         await bot.download_file(file.file_path, DB_PATH)
+        print(f"DEBUG: DB restored from file, running migrations...")
+
+        # 🔧 КЛЮЧЕВОЕ: прогоняем миграции на восстановленной БД
+        await init_db()
+
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute("SELECT COUNT(*) FROM listings") as cur:
                 count = (await cur.fetchone())[0]
+            async with db.execute("PRAGMA table_info(listings)") as cur:
+                cols = [r[1] for r in await cur.fetchall()]
+
         await message.answer(
-            f"✅ База данных восстановлена!\n"
-            f"📊 Объявлений в базе: {count}\n\n"
-            f"⚠️ Данные сохранятся только до следующего перезапуска Render."
+            f"✅ БД восстановлена и мигрирована!\n\n"
+            f"📊 Объявлений: {count}\n"
+            f"📋 Колонок: {len(cols)}\n"
+            f"<code>{', '.join(cols)}</code>\n\n"
+            f"⚠️ На Free-плане Render данные сохранятся только до следующего рестарта.",
+            parse_mode="HTML"
         )
     except Exception as e:
-        await message.answer(f"❌ Ошибка восстановления: {e}")
+        import traceback
+        tb = traceback.format_exc()[:1000]
+        await message.answer(
+            f"❌ Ошибка восстановления:\n<code>{escape_html(str(e))}</code>\n\n"
+            f"<pre>{escape_html(tb)}</pre>",
+            parse_mode="HTML"
+        )
     finally:
         await state.clear()
 
