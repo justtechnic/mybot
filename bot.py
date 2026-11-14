@@ -534,6 +534,7 @@ async def cb_promote_back(callback: types.CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data == "promote_donatepay_done")
 async def cb_promote_donatepay_done(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
+    print(f"DEBUG: promote_donatepay_done, data = {data}")
     if data.get("donatepay_pending"):
         await callback.answer("Заявка уже отправлена, ожидайте проверки.", show_alert=True)
         return
@@ -762,6 +763,7 @@ async def cb_dp_confirm(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("dp_promote_confirm_"))
 async def cb_dp_promote_confirm(callback: types.CallbackQuery):
+    print(f"DEBUG: cb_dp_promote_confirm called, data = {callback.data}")
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("Нет доступа", show_alert=True)
         return
