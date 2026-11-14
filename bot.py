@@ -1892,6 +1892,17 @@ async def process_subscription_keyword(message: types.Message, state: FSMContext
         await message.answer("Слишком короткое слово, минимум 2 символа.")
         return
     async with aiosqlite.connect(DB_PATH) as db:
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS subscriptions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    keyword TEXT NOT NULL,
+                    created_at TIMESTAMP
+                )
+            """)
+        except sqlite3.OperationalError as e:
+            print(f"DEBUG: CREATE subscriptions error: {e}")
         await db.execute(
             "INSERT INTO subscriptions (user_id, keyword, created_at) VALUES (?, ?, ?)",
             (message.from_user.id, keyword, datetime.now().isoformat())
@@ -1905,12 +1916,24 @@ async def process_subscription_keyword(message: types.Message, state: FSMContext
 @dp.callback_query(F.data == "sub_list")
 async def cb_sub_list(callback: types.CallbackQuery):
     async with aiosqlite.connect(DB_PATH) as db:
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS subscriptions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    keyword TEXT NOT NULL,
+                    created_at TIMESTAMP
+                )
+            """)
+        except sqlite3.OperationalError:
+            pass
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM subscriptions WHERE user_id = ? ORDER BY id DESC",
             (callback.from_user.id,)
         ) as cur:
             subs = await cur.fetchall()
+
     if not subs:
         await callback.message.edit_text(
             "У вас нет подписок.",
@@ -1933,8 +1956,6 @@ async def cb_sub_list(callback: types.CallbackQuery):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
     )
     await callback.answer()
-
-
 @dp.callback_query(F.data.startswith("sub_del_"))
 async def cb_sub_del(callback: types.CallbackQuery):
     sub_id = int(callback.data.split("_")[2])
