@@ -165,6 +165,7 @@ async def init_db():
         await db.commit()
         print("DEBUG: init_db finished")
 
+
 async def save_listing(user_id, data, status='PENDING_MODERATION', is_trial=False):
     async with aiosqlite.connect(DB_PATH) as db:
         try:
@@ -417,6 +418,56 @@ async def cb_free_continue(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+@dp.callback_query(F.data == "pub_paid")
+async def cb_pub_paid(callback: types.CallbackQuery, state: FSMContext):
+    await state.update_data(paid_context="new", moderation_sent=False)
+    await callback.message.edit_text(
+        "Отлично! Ваше объявление будет выставлено на 7 дней с публикацией "
+        "в истории у Владельца, после окончания срока объявление будет снято "
+        "с продажи, но его можно будет продлить, если потребуется.\n\n"
+        "Выберите способ оплаты:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="25⭐️", callback_data="pay_stars")],
+            [InlineKeyboardButton(text="25💸", callback_data="pay_donatepay")],
+            [InlineKeyboardButton(text="↩️ Назад", callback_data="publish")]
+        ])
+    )
+    await callback.answer()
+
+
+# ---------- ПРОДВИЖЕНИЕ (ТОП) ----------
+
+@dp.callback_query(F.data.startswith("promote_lot_"))
+async def cb_promote(callback: types.CallbackQuery, state: FSMContext):
+    parts = callback.data.split("_")
+    if len(parts) < 3 or not parts[2].isdigit():
+        return
+    lot_id = int(parts[2])
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM listings WHERE id = ? AND user_id = ? AND status = 'ACTIVE'",
+            (lot_id, callback.from_user.id)
+        ) as cur:
+            ad = await cur.fetchone()
+    if not ad:
+        await callback.answer("Объявление не найдено.", show_alert=True)
+        return
+    await state.update_data(promote_lot_id=lot_id, paid_context="promote")
+    await callback.message.edit_text(
+        "🚀 <b>Поднятие объявления в топ</b>\n\n"
+        "Объявление будет закреплено в канале на 7 дней с пометкой 🔥 ТОП.\n\n"
+        "Выберите способ оплаты:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="25⭐️", callback_data="promote_pay_stars")],
+            [InlineKeyboardButton(text="25💸", callback_data="promote_pay_donatepay")],
+            [InlineKeyboardButton(text="↩️ Назад", callback_data="main_menu")]
+        ]),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
 @dp.callback_query(F.data == "promote_pay_stars")
 async def cb_promote_stars(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -457,34 +508,26 @@ async def cb_promote_donatepay(callback: types.CallbackQuery, state: FSMContext)
     )
     await callback.answer()
 
-@dp.callback_query(F.data.startswith("promote_lot_"))
-async def cb_promote(callback: types.CallbackQuery, state: FSMContext):
-    parts = callback.data.split("_")
-    if len(parts) < 3 or not parts[2].isdigit():
-        return
-    lot_id = int(parts[2])
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM listings WHERE id = ? AND user_id = ? AND status = 'ACTIVE'",
-            (lot_id, callback.from_user.id)
-        ) as cur:
-            ad = await cur.fetchone()
-    if not ad:
-        await callback.answer("Объявление не найдено.", show_alert=True)
-        return
-    await state.update_data(promote_lot_id=lot_id, paid_context="promote")
-    await callback.message.edit_text(
-        "🚀 <b>Поднятие объявления в топ</b>\n\n"
-        "Объявление будет закреплено в канале на 7 дней с пометкой 🔥 ТОП.\n\n"
-        "Выберите способ оплаты:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="25⭐️", callback_data="promote_pay_stars")],
-            [InlineKeyboardButton(text="25💸", callback_data="promote_pay_donatepay")],
-            [InlineKeyboardButton(text="↩️ Назад", callback_data="main_menu")]
-        ]),
-        parse_mode="HTML"
-    )
+
+@dp.callback_query(F.data == "promote_back")
+async def cb_promote_back(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    lot_id = data.get("promote_lot_id")
+    if lot_id:
+        await state.update_data(paid_context="promote")
+        await callback.message.edit_text(
+            "🚀 <b>Поднятие объявления в топ</b>\n\n"
+            "Объявление будет закреплено в канале на 7 дней с пометкой 🔥 ТОП.\n\n"
+            "Выберите способ оплаты:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="25⭐️", callback_data="promote_pay_stars")],
+                [InlineKeyboardButton(text="25💸", callback_data="promote_pay_donatepay")],
+                [InlineKeyboardButton(text="↩️ Назад", callback_data="main_menu")]
+            ]),
+            parse_mode="HTML"
+        )
+    else:
+        await callback.message.edit_text("Объявление не найдено.")
     await callback.answer()
 
 
@@ -537,47 +580,6 @@ async def cb_promote_donatepay_done(callback: types.CallbackQuery, state: FSMCon
         )
     await callback.answer()
 
-@dp.callback_query(F.data == "pub_paid")
-async def cb_pub_paid(callback: types.CallbackQuery, state: FSMContext):
-    await state.update_data(paid_context="new", moderation_sent=False)
-    await callback.message.edit_text(
-        "Отлично! Ваше объявление будет выставлено на 7 дней с публикацией "
-        "в истории у Владельца, после окончания срока объявление будет снято "
-        "с продажи, но его можно будет продлить, если потребуется.\n\n"
-        "Выберите способ оплаты:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="25⭐️", callback_data="pay_stars")],
-            [InlineKeyboardButton(text="25💸", callback_data="pay_donatepay")],
-            [InlineKeyboardButton(text="↩️ Назад", callback_data="publish")]
-        ])
-    )
-    await callback.answer()
-
-
-# ---------- ПРОДВИЖЕНИЕ (ТОП) ----------
-
-
-
-@dp.callback_query(F.data == "promote_back")
-async def cb_promote_back(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    lot_id = data.get("promote_lot_id")
-    if lot_id:
-        await state.update_data(paid_context="promote")
-        await callback.message.edit_text(
-            "🚀 <b>Поднятие объявления в топ</b>\n\n"
-            "Объявление будет закреплено в канале на 7 дней с пометкой 🔥 ТОП.\n\n"
-            "Выберите способ оплаты:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="25⭐️", callback_data="promote_pay_stars")],
-                [InlineKeyboardButton(text="25💸", callback_data="promote_pay_donatepay")],
-                [InlineKeyboardButton(text="↩️ Назад", callback_data="main_menu")]
-            ]),
-            parse_mode="HTML"
-        )
-    else:
-        await callback.message.edit_text("Объявление не найдено.")
-    await callback.answer()
 
 # ---------- ОПЛАТА ЗВЁЗДАМИ / DONATEPAY ----------
 
@@ -856,7 +858,6 @@ async def cb_dp_reject(callback: types.CallbackQuery):
 @dp.pre_checkout_query()
 async def pre_checkout(query: PreCheckoutQuery):
     await query.answer(ok=True)
-
 @dp.callback_query(F.data.startswith("adtype_"))
 async def cb_adtype(callback: types.CallbackQuery, state: FSMContext):
     ad_type = callback.data.split("_")[1]
@@ -1318,10 +1319,14 @@ async def approve_ad(callback: types.CallbackQuery):
         except Exception:
             author_tag = f'<a href="tg://user?id={row["user_id"]}">Продавец</a>'
 
-        async with aiosqlite.connect(DB_PATH) as db2:
-            async with db2.execute("SELECT verified FROM users WHERE user_id = ?", (row['user_id'],)) as cur:
-                u = await cur.fetchone()
-            verified = bool(u[0]) if u else False
+        try:
+            async with aiosqlite.connect(DB_PATH) as db2:
+                async with db2.execute("SELECT verified FROM users WHERE user_id = ?", (row['user_id'],)) as cur:
+                    u = await cur.fetchone()
+                verified = bool(u[0]) if u else False
+        except Exception as e:
+            print(f"DEBUG: verified select error: {e}")
+            verified = False
 
         post_text = build_post_text(row, status="АКТУАЛЬНО", author_tag=author_tag, author_id=row['user_id'], verified=verified)
         photos = row['photos'].split(",") if row['photos'] else []
@@ -1345,7 +1350,6 @@ async def approve_ad(callback: types.CallbackQuery):
                             else:
                                 media.append(InputMediaPhoto(media=ph))
                         sent_msgs = await bot.send_media_group(chat_id=channel, media=media)
-                        # Сохраняем ВСЕ message_id альбома
                         for sm in sent_msgs:
                             saved_pairs.append(f"{channel}:{sm.message_id}")
                         if not first_channel:
@@ -1359,7 +1363,26 @@ async def approve_ad(callback: types.CallbackQuery):
                         first_message_id = sent.message_id
             except Exception as e:
                 print(f"Ошибка публикации: {e}")
-    # Уведомления подписчикам
+
+        await db.execute(
+            "UPDATE listings SET status = 'ACTIVE', channel = ?, message_id = ?, message_ids = ? WHERE id = ?",
+            (first_channel, first_message_id, ",".join(saved_pairs), lot_id)
+        )
+        await db.commit()
+
+    try:
+        await bot.send_message(
+            row['user_id'],
+            "Ваша публикация одобрена!👍",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🥷🏻 Мой профиль", callback_data="profile")],
+                [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
+            ])
+        )
+        print(f"DEBUG: уведомление отправлено {row['user_id']}")
+    except Exception as e:
+        print(f"DEBUG: не удалось уведомить {row['user_id']}: {e}")
+
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
@@ -1453,8 +1476,8 @@ async def reject_ad(callback: types.CallbackQuery):
                 [InlineKeyboardButton(text="🏡 В главное меню", callback_data="main_menu")]
             ])
         )
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"DEBUG: reject_ad send_message error: {e}")
 
     try:
         await callback.message.edit_caption(caption="Объявление отклонено.")
@@ -1483,7 +1506,6 @@ async def cancel(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("Действие отменено.", reply_markup=bottom_menu())
     await show_main_menu(message)
-
 @dp.callback_query(F.data == "my_ads")
 async def cb_my_ads(callback: types.CallbackQuery):
     await _send_my_ads(callback.message, callback.from_user.id)
@@ -1586,7 +1608,6 @@ async def cb_remove_ad(callback: types.CallbackQuery):
             await callback.answer("Объявление не найдено или уже снято.", show_alert=True)
             return
 
-        # Сохраняем флаг ДО update
         try:
             was_promoted = bool(ad["is_promoted"])
         except (KeyError, IndexError):
@@ -1598,7 +1619,6 @@ async def cb_remove_ad(callback: types.CallbackQuery):
         )
         await db.commit()
 
-    # Открепляем, если было закреплено
     if was_promoted:
         pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
         if not pairs and ad["channel"] and ad["message_id"]:
@@ -1618,10 +1638,13 @@ async def cb_remove_ad(callback: types.CallbackQuery):
         tag = make_author_tag(author.username, author.first_name, ad['user_id'])
     except Exception:
         tag = f'<a href="tg://user?id={ad["user_id"]}">Продавец</a>'
-    async with aiosqlite.connect(DB_PATH) as db2:
-        async with db2.execute("SELECT verified FROM users WHERE user_id = ?", (ad['user_id'],)) as cur2:
-            u2 = await cur2.fetchone()
-        verified = bool(u2[0]) if u2 else False
+    try:
+        async with aiosqlite.connect(DB_PATH) as db2:
+            async with db2.execute("SELECT verified FROM users WHERE user_id = ?", (ad['user_id'],)) as cur2:
+                u2 = await cur2.fetchone()
+            verified = bool(u2[0]) if u2 else False
+    except Exception:
+        verified = False
     new_caption = build_post_text(ad, status="ПРОДАНО", author_tag=tag, author_id=ad['user_id'], verified=verified)
 
     pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
@@ -1651,6 +1674,7 @@ async def cb_remove_ad(callback: types.CallbackQuery):
     except Exception:
         await callback.message.answer("Объявление снято с продажи.")
     await callback.answer()
+
 
 # ---------- ПРОФИЛЬ ----------
 
@@ -1851,7 +1875,6 @@ async def cb_dp_verify_confirm(callback: types.CallbackQuery):
                         )
                     except Exception as e:
                         print(f"Не удалось отредактировать {ch}/{mid}: {e}")
-        await db.commit()
     try:
         await bot.send_message(user_id, "✅ Верификация подтверждена! Теперь в вашем профиле есть галочка.")
     except Exception:
@@ -1956,6 +1979,8 @@ async def cb_sub_list(callback: types.CallbackQuery):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
     )
     await callback.answer()
+
+
 @dp.callback_query(F.data.startswith("sub_del_"))
 async def cb_sub_del(callback: types.CallbackQuery):
     sub_id = int(callback.data.split("_")[2])
@@ -2095,6 +2120,7 @@ async def cmd_stats(message: types.Message):
     )
     await message.answer(text, parse_mode="HTML")
 
+
 @dp.message(Command("check_ads"))
 async def cmd_check_ads(message: types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -2218,10 +2244,13 @@ async def expire_loop():
                 except Exception:
                     tag = f'<a href="tg://user?id={ad["user_id"]}">Продавец</a>'
 
-                async with aiosqlite.connect(DB_PATH) as db2:
-                    async with db2.execute("SELECT verified FROM users WHERE user_id = ?", (ad['user_id'],)) as cur2:
-                        u2 = await cur2.fetchone()
-                    verified = bool(u2[0]) if u2 else False
+                try:
+                    async with aiosqlite.connect(DB_PATH) as db2:
+                        async with db2.execute("SELECT verified FROM users WHERE user_id = ?", (ad['user_id'],)) as cur2:
+                            u2 = await cur2.fetchone()
+                        verified = bool(u2[0]) if u2 else False
+                except Exception:
+                    verified = False
 
                 new_caption = build_post_text(ad, status="ПРОДАНО", author_tag=tag, author_id=ad['user_id'], verified=verified)
                 pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
@@ -2291,10 +2320,13 @@ async def unpin_loop():
                 ad_dict = dict(ad)
                 ad_dict["is_promoted"] = 0
 
-                async with aiosqlite.connect(DB_PATH) as db2:
-                    async with db2.execute("SELECT verified FROM users WHERE user_id = ?", (ad['user_id'],)) as cur2:
-                        u2 = await cur2.fetchone()
-                    verified = bool(u2[0]) if u2 else False
+                try:
+                    async with aiosqlite.connect(DB_PATH) as db2:
+                        async with db2.execute("SELECT verified FROM users WHERE user_id = ?", (ad['user_id'],)) as cur2:
+                            u2 = await cur2.fetchone()
+                        verified = bool(u2[0]) if u2 else False
+                except Exception:
+                    verified = False
 
                 new_caption = build_post_text(ad_dict, status="АКТУАЛЬНО", author_tag=tag, author_id=ad['user_id'], verified=verified)
                 pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
@@ -2415,19 +2447,20 @@ async def on_successful_payment(message: Message, state: FSMContext):
         ad_dict = dict(ad)
         ad_dict["is_promoted"] = 1
 
-        async with aiosqlite.connect(DB_PATH) as db2:
-            async with db2.execute("SELECT verified FROM users WHERE user_id = ?", (ad['user_id'],)) as cur2:
-                u2 = await cur2.fetchone()
-            verified = bool(u2[0]) if u2 else False
+        try:
+            async with aiosqlite.connect(DB_PATH) as db2:
+                async with db2.execute("SELECT verified FROM users WHERE user_id = ?", (ad['user_id'],)) as cur2:
+                    u2 = await cur2.fetchone()
+                verified = bool(u2[0]) if u2 else False
+        except Exception:
+            verified = False
 
-    post_text = build_post_text(ad_dict, status="АКТУАЛЬНО", author_tag=tag, author_id=ad['user_id'], verified=verified)
-    pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
-    if not pairs and ad["channel"] and ad["message_id"]:
-        pairs = [f"{ad['channel']}:{ad['message_id']}"]
-    for pair in pairs:
-        pair = pair.strip()
-        if ":" not in pair:
-            continue
+        post_text = build_post_text(ad_dict, status="АКТУАЛЬНО", author_tag=tag, author_id=ad['user_id'], verified=verified)
+        pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
+        if not pairs and ad["channel"] and ad["message_id"]:
+            pairs = [f"{ad['channel']}:{ad['message_id']}"]
+        for pair in pairs:
+            pair = pair.strip()
             if ":" not in pair:
                 continue
             ch, mid = pair.rsplit(":", 1)
@@ -2470,6 +2503,10 @@ async def on_successful_payment(message: Message, state: FSMContext):
 
     if payload.startswith("verify_"):
         async with aiosqlite.connect(DB_PATH) as db:
+            try:
+                await db.execute("ALTER TABLE users ADD COLUMN verified INTEGER DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
             await db.execute("UPDATE users SET verified = 1 WHERE user_id = ?", (user_id,))
             await db.commit()
 
@@ -2508,7 +2545,6 @@ async def on_successful_payment(message: Message, state: FSMContext):
                         )
                     except Exception as e:
                         print(f"Не удалось отредактировать {ch}/{mid}: {e}")
-            await db.commit()
         await message.answer("✅ Верификация подтверждена! В профиле появилась галочка.")
         try:
             await bot.send_message(
@@ -2546,10 +2582,13 @@ async def on_successful_payment(message: Message, state: FSMContext):
         except Exception:
             tag = f'<a href="tg://user?id={user_id}">Продавец</a>'
 
-        async with aiosqlite.connect(DB_PATH) as db2:
-            async with db2.execute("SELECT verified FROM users WHERE user_id = ?", (user_id,)) as cur2:
-                u2 = await cur2.fetchone()
-            verified = bool(u2[0]) if u2 else False
+        try:
+            async with aiosqlite.connect(DB_PATH) as db2:
+                async with db2.execute("SELECT verified FROM users WHERE user_id = ?", (user_id,)) as cur2:
+                    u2 = await cur2.fetchone()
+                verified = bool(u2[0]) if u2 else False
+        except Exception:
+            verified = False
 
         new_caption = build_post_text(ad, status="АКТУАЛЬНО", author_tag=tag, author_id=user_id, verified=verified)
         pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
