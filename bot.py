@@ -777,8 +777,16 @@ async def cb_dp_promote_confirm(callback: types.CallbackQuery):
     if not ad:
         await callback.answer("Объявление не найдено.", show_alert=True)
         return
-    promoted_until = (datetime.now() + timedelta(days=7)).isoformat()
+        promoted_until = (datetime.now() + timedelta(days=7)).isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
+        try:
+            await db.execute("ALTER TABLE listings ADD COLUMN is_promoted INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            await db.execute("ALTER TABLE listings ADD COLUMN promoted_until TIMESTAMP")
+        except sqlite3.OperationalError:
+            pass
         await db.execute(
             "UPDATE listings SET is_promoted = 1, promoted_until = ? WHERE id = ?",
             (promoted_until, lot_id)
@@ -2436,6 +2444,14 @@ async def on_successful_payment(message: Message, state: FSMContext):
             return
         promoted_until = (datetime.now() + timedelta(days=7)).isoformat()
         async with aiosqlite.connect(DB_PATH) as db:
+            try:
+                await db.execute("ALTER TABLE listings ADD COLUMN is_promoted INTEGER DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                await db.execute("ALTER TABLE listings ADD COLUMN promoted_until TIMESTAMP")
+            except sqlite3.OperationalError:
+                pass
             await db.execute(
                 "UPDATE listings SET is_promoted = 1, promoted_until = ? WHERE id = ?",
                 (promoted_until, lot_id)
