@@ -1,13 +1,10 @@
 venv/
-ads.db
+.venv/
+*.db
+*.sqlite
+*.sqlite3
 __pycache__/
 *.pyc
 .DS_Store
 .env
-cat .gitignore
-
-
-
-
-cat .gitignore
-printf "venv/\nads.db\n__pycache__/\n*.pyc\n.DS_Store\n.env\n" > .gitignore
+.env.*
