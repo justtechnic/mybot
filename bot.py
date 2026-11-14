@@ -111,20 +111,6 @@ async def init_db():
                 seller_verified INTEGER DEFAULT 0
             )
         """)
-        for ddl in [
-            "ALTER TABLE listings ADD COLUMN message_ids TEXT",
-            "ALTER TABLE listings ADD COLUMN charge_id TEXT",
-            "ALTER TABLE listings ADD COLUMN subcategory TEXT",
-            "ALTER TABLE listings ADD COLUMN is_promoted INTEGER DEFAULT 0",
-            "ALTER TABLE listings ADD COLUMN promoted_until TIMESTAMP",
-            "ALTER TABLE listings ADD COLUMN seller_verified INTEGER DEFAULT 0",
-        ]:
-            try:
-                await db.execute(ddl)
-            except sqlite3.OperationalError as e:
-                if "duplicate column name" not in str(e).lower():
-                    print(f"DEBUG: {ddl} -> {e}")
-                    raise
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -132,19 +118,47 @@ async def init_db():
                 verified INTEGER DEFAULT 0
             )
         """)
-        try:
-            await db.execute("ALTER TABLE users ADD COLUMN verified INTEGER DEFAULT 0")
-        except sqlite3.OperationalError:
-            pass
         await db.execute("""
             CREATE TABLE IF NOT EXISTS subscriptions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL, keyword TEXT NOT NULL, created_at TIMESTAMP
             )
         """)
-        await db.commit()
-        print("DEBUG: init_db finished")
 
+        # Принудительные миграции — добавляем ВСЕ возможные колонки,
+        # ошибки "duplicate column" игнорируем
+        migrations = [
+            "ALTER TABLE listings ADD COLUMN subcategory TEXT",
+            "ALTER TABLE listings ADD COLUMN message_ids TEXT",
+            "ALTER TABLE listings ADD COLUMN charge_id TEXT",
+            "ALTER TABLE listings ADD COLUMN is_promoted INTEGER DEFAULT 0",
+            "ALTER TABLE listings ADD COLUMN promoted_until TIMESTAMP",
+            "ALTER TABLE listings ADD COLUMN seller_verified INTEGER DEFAULT 0",
+            "ALTER TABLE listings ADD COLUMN ad_type TEXT",
+            "ALTER TABLE listings ADD COLUMN model TEXT",
+            "ALTER TABLE listings ADD COLUMN memory TEXT",
+            "ALTER TABLE listings ADD COLUMN description TEXT",
+            "ALTER TABLE listings ADD COLUMN price TEXT",
+            "ALTER TABLE listings ADD COLUMN city TEXT",
+            "ALTER TABLE listings ADD COLUMN delivery TEXT",
+            "ALTER TABLE listings ADD COLUMN photos TEXT",
+            "ALTER TABLE listings ADD COLUMN status TEXT DEFAULT 'DRAFT'",
+            "ALTER TABLE listings ADD COLUMN created_at TIMESTAMP",
+            "ALTER TABLE listings ADD COLUMN expires_at TIMESTAMP",
+            "ALTER TABLE listings ADD COLUMN is_trial BOOLEAN DEFAULT 0",
+            "ALTER TABLE listings ADD COLUMN channel TEXT",
+            "ALTER TABLE listings ADD COLUMN message_id INTEGER",
+            "ALTER TABLE users ADD COLUMN verified INTEGER DEFAULT 0",
+        ]
+        for ddl in migrations:
+            try:
+                await db.execute(ddl)
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e).lower():
+                    print(f"DEBUG: {ddl} -> {e}")
+
+        await db.commit()
+        print("DEBUG: init_db finished, migrations applied")
 
 async def save_listing(user_id, data, status='PENDING_MODERATION', is_trial=False):
     async with aiosqlite.connect(DB_PATH) as db:
