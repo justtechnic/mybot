@@ -2565,7 +2565,7 @@ async def backup_loop():
                 print(f"Файл {DB_PATH} не найден, бэкап пропущен")
         except Exception as e:
             print(f"Ошибка бэкапа: {e}")
-        await asyncio.sleep(86400)
+        await asyncio.sleep(3600)
 
 
 # ---------- ПРОДЛЕНИЕ И ОПЛАТА ----------
