@@ -108,7 +108,8 @@ async def init_db():
                 created_at TIMESTAMP, expires_at TIMESTAMP, is_trial BOOLEAN DEFAULT 0,
                 channel TEXT, message_id INTEGER, message_ids TEXT, charge_id TEXT,
                 is_promoted INTEGER DEFAULT 0, promoted_until TIMESTAMP,
-                seller_verified INTEGER DEFAULT 0
+                seller_verified INTEGER DEFAULT 0,
+                full_caption TEXT
             )
         """)
         await db.execute("""
@@ -1374,9 +1375,13 @@ async def approve_ad(callback: types.CallbackQuery):
             except Exception as e:
                 print(f"Ошибка публикации: {e}")
 
+        try:
+            await db.execute("ALTER TABLE listings ADD COLUMN full_caption TEXT")
+        except sqlite3.OperationalError:
+            pass
         await db.execute(
-            "UPDATE listings SET status = 'ACTIVE', channel = ?, message_id = ?, message_ids = ? WHERE id = ?",
-            (first_channel, first_message_id, ",".join(saved_pairs), lot_id)
+            "UPDATE listings SET status = 'ACTIVE', channel = ?, message_id = ?, message_ids = ?, full_caption = ? WHERE id = ?",
+            (first_channel, first_message_id, ",".join(saved_pairs), post_text, lot_id)
         )
         await db.commit()
 
@@ -1650,8 +1655,9 @@ async def cb_remove_ad(callback: types.CallbackQuery):
             verified = bool(u2[0]) if u2 else False
     except Exception:
         verified = False
-    new_caption = build_post_text(ad, status="ПРОДАНО", author_tag=tag, author_id=ad['user_id'], verified=verified)
-
+       # Берём сохранённую полную подпись и меняем только заголовок
+    full_caption = ad["full_caption"] if ad["full_caption"] else build_post_text(ad, status="АКТУАЛЬНО", author_tag=tag, author_id=ad['user_id'], verified=verified)
+    new_caption = full_caption.replace("✅АКТУАЛЬНО✅", "❌ПРОДАНО❌").replace("🔥 ТОП\n", "")
     pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
     if not pairs and ad["channel"] and ad["message_id"]:
         pairs = [f"{ad['channel']}:{ad['message_id']}"]
