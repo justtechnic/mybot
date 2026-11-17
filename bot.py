@@ -133,7 +133,7 @@ async def init_db():
         required = {
             "subcategory": "TEXT", "message_ids": "TEXT", "charge_id": "TEXT",
             "is_promoted": "INTEGER DEFAULT 0", "promoted_until": "TIMESTAMP",
-            "seller_verified": "INTEGER DEFAULT 0",
+            "seller_verified": "INTEGER DEFAULT 0", "full_caption": "TEXT",
             "ad_type": "TEXT", "model": "TEXT", "memory": "TEXT",
             "description": "TEXT", "price": "TEXT", "city": "TEXT",
             "delivery": "TEXT", "photos": "TEXT", "status": "TEXT DEFAULT 'DRAFT'",
@@ -164,6 +164,7 @@ async def init_db():
                 pass
 
         print("DEBUG: init_db finished")
+
 
 async def save_listing(user_id, data, status='PENDING_MODERATION', is_trial=False):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -285,16 +286,46 @@ def make_author_tag(username: str, first_name: str, user_id: int) -> str:
 
 
 def build_post_text(ad, status="АКТУАЛЬНО", author_tag=None, author_id=None, verified=False):
+    # Безопасное получение полей (защита от None)
+    model_raw = ad["model"] if ad["model"] is not None else "—"
+    price_raw = ad["price"] if ad["price"] is not None else "—"
+    city_raw = ad["city"] if ad["city"] is not None else "—"
+    category_raw = ad["category"] if ad["category"] is not None else "—"
+    description_raw = ad["description"] if ad["description"] is not None else ""
+    delivery_raw = ad["delivery"] if ad["delivery"] is not None else "—"
+
+    # Для «ПРОДАНО» — короткая версия (гарантированно влезает в caption)
     if status == "ПРОДАНО":
-        header = "❌ПРОДАНО❌"
-    else:
-        header = "✅АКТУАЛЬНО✅"
+        if author_tag:
+            tag = author_tag
+        elif author_id:
+            tag = f'<a href="tg://user?id={author_id}">Продавец</a>'
+        else:
+            tag = str(ad["user_id"])
+        if verified:
+            tag = f"{tag} ✅"
+
+        safe_model = escape_html(model_raw)
+        safe_price = escape_html(price_raw)
+        safe_city = escape_html(city_raw)
+
+        short = (
+            f"❌ПРОДАНО❌\n"
+            f"📦 {safe_model}\n"
+            f"💸 {safe_price}\n"
+            f"🇷🇺 {safe_city}\n\n"
+            f"🥷🏻 {tag}"
+        )
+        return short[:1000]
+
+    # Обычная версия для «АКТУАЛЬНО»
+    header = "✅АКТУАЛЬНО✅"
     is_promoted = False
     try:
         is_promoted = bool(ad["is_promoted"])
     except (KeyError, IndexError):
         pass
-    if is_promoted and status != "ПРОДАНО":
+    if is_promoted:
         header = "🔥 ТОП\n" + header
 
     if author_tag:
@@ -306,12 +337,12 @@ def build_post_text(ad, status="АКТУАЛЬНО", author_tag=None, author_id=
     if verified:
         tag = f"{tag} ✅ Проверенный продавец"
 
-    safe_model = escape_html(ad["model"])
-    safe_category = escape_html(ad["category"])
-    safe_city = escape_html(ad["city"])
-    safe_desc = escape_html(ad["description"])
-    safe_price = escape_html(ad["price"])
-    safe_delivery = escape_html(ad["delivery"])
+    safe_model = escape_html(model_raw)
+    safe_category = escape_html(category_raw)
+    safe_city = escape_html(city_raw)
+    safe_desc = escape_html(description_raw)
+    safe_price = escape_html(price_raw)
+    safe_delivery = escape_html(delivery_raw)
     safe_memory = escape_html(ad["memory"]) if ad["memory"] and ad["memory"] != "—" else None
 
     subcat = None
@@ -360,6 +391,33 @@ async def safe_append_and_edit(message: types.Message, suffix: str):
             return
     except Exception:
         pass
+
+
+async def edit_post_caption_only_first(ad, caption, parse_mode="HTML"):
+    """Редактирует caption ТОЛЬКО у первого сообщения каждого канала.
+    Для медиа-групп трогает только первое фото — у остальных caption нет.
+    Это предотвращает сброс caption у всей группы."""
+    pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
+    if not pairs and ad["channel"] and ad["message_id"]:
+        pairs = [f"{ad['channel']}:{ad['message_id']}"]
+    seen = set()
+    for pair in pairs:
+        pair = pair.strip()
+        if ":" not in pair:
+            continue
+        ch, mid = pair.rsplit(":", 1)
+        if ch in seen:
+            continue
+        seen.add(ch)
+        try:
+            await bot.edit_message_caption(
+                chat_id=ch, message_id=int(mid),
+                caption=caption, parse_mode=parse_mode
+            )
+            print(f"DEBUG: caption updated {ch}/{mid}")
+        except Exception as e:
+            print(f"DEBUG: edit_caption failed {ch}/{mid}: {e}")
+
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -710,11 +768,6 @@ async def cb_dp_confirm(callback: types.CallbackQuery, state: FSMContext):
                 await callback.answer("Объявление не найдено.", show_alert=True)
                 return
             new_expires = (datetime.now() + timedelta(days=7)).isoformat()
-            await db.execute(
-                "UPDATE listings SET status = 'ACTIVE', expires_at = ? WHERE id = ?",
-                (new_expires, lot_id)
-            )
-            await db.commit()
             try:
                 author = await bot.get_chat(user_id)
                 tag = make_author_tag(author.username, author.first_name, user_id)
@@ -725,21 +778,12 @@ async def cb_dp_confirm(callback: types.CallbackQuery, state: FSMContext):
                     u2 = await cur2.fetchone()
                 verified = bool(u2[0]) if u2 else False
             new_caption = build_post_text(ad, status="АКТУАЛЬНО", author_tag=tag, author_id=user_id, verified=verified)
-            pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
-            if not pairs and ad["channel"] and ad["message_id"]:
-                pairs = [f"{ad['channel']}:{ad['message_id']}"]
-            for pair in pairs:
-                pair = pair.strip()
-                if ":" not in pair:
-                    continue
-                ch, mid = pair.rsplit(":", 1)
-                try:
-                    await bot.edit_message_caption(chat_id=ch, message_id=int(mid), caption=new_caption, parse_mode="HTML")
-                except Exception:
-                    try:
-                        await bot.edit_message_text(chat_id=ch, message_id=int(mid), text=new_caption, parse_mode="HTML")
-                    except Exception as e:
-                        print(f"Не удалось отредактировать {ch}/{mid}: {e}")
+            await db.execute(
+                "UPDATE listings SET status = 'ACTIVE', expires_at = ?, full_caption = ? WHERE id = ?",
+                (new_expires, new_caption, lot_id)
+            )
+            await db.commit()
+            await edit_post_caption_only_first(ad, new_caption)
             try:
                 await bot.send_message(user_id, "✅ Оплата подтверждена! Публикация продлена на 7 дней.")
             except Exception:
@@ -787,21 +831,6 @@ async def cb_dp_promote_confirm(callback: types.CallbackQuery):
 
     promoted_until = (datetime.now() + timedelta(days=7)).isoformat()
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        try:
-            await db.execute("ALTER TABLE listings ADD COLUMN is_promoted INTEGER DEFAULT 0")
-        except sqlite3.OperationalError:
-            pass
-        try:
-            await db.execute("ALTER TABLE listings ADD COLUMN promoted_until TIMESTAMP")
-        except sqlite3.OperationalError:
-            pass
-        await db.execute(
-            "UPDATE listings SET is_promoted = 1, promoted_until = ? WHERE id = ?",
-            (promoted_until, lot_id)
-        )
-        await db.commit()
-
     try:
         author = await bot.get_chat(user_id)
         tag = make_author_tag(author.username, author.first_name, user_id)
@@ -815,21 +844,29 @@ async def cb_dp_promote_confirm(callback: types.CallbackQuery):
         verified = bool(u2[0]) if u2 else False
 
     post_text = build_post_text(ad_dict, status="АКТУАЛЬНО", author_tag=tag, author_id=user_id, verified=verified)
-    pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
-    if not pairs and ad["channel"] and ad["message_id"]:
-        pairs = [f"{ad['channel']}:{ad['message_id']}"]
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE listings SET is_promoted = 1, promoted_until = ?, full_caption = ? WHERE id = ?",
+            (promoted_until, post_text, lot_id)
+        )
+        await db.commit()
+
+    await edit_post_caption_only_first(ad_dict, post_text)
+
+    # Закрепляем только первое сообщение каждого канала
+    pairs = (ad_dict["message_ids"] or "").split(",") if ad_dict["message_ids"] else []
+    if not pairs and ad_dict["channel"] and ad_dict["message_id"]:
+        pairs = [f"{ad_dict['channel']}:{ad_dict['message_id']}"]
+    seen_ch = set()
     for pair in pairs:
         pair = pair.strip()
         if ":" not in pair:
             continue
         ch, mid = pair.rsplit(":", 1)
-        try:
-            await bot.edit_message_caption(chat_id=ch, message_id=int(mid), caption=post_text, parse_mode="HTML")
-        except Exception:
-            try:
-                await bot.edit_message_text(chat_id=ch, message_id=int(mid), text=post_text, parse_mode="HTML")
-            except Exception as e:
-                print(f"Не удалось отредактировать {ch}/{mid}: {e}")
+        if ch in seen_ch:
+            continue
+        seen_ch.add(ch)
         try:
             await bot.pin_chat_message(chat_id=ch, message_id=int(mid), disable_notification=True)
         except Exception as e:
@@ -872,6 +909,7 @@ async def cb_dp_reject(callback: types.CallbackQuery):
 @dp.pre_checkout_query()
 async def pre_checkout(query: PreCheckoutQuery):
     await query.answer(ok=True)
+
 @dp.callback_query(F.data.startswith("adtype_"))
 async def cb_adtype(callback: types.CallbackQuery, state: FSMContext):
     ad_type = callback.data.split("_")[1]
@@ -1258,10 +1296,22 @@ async def send_moderation(callback: types.CallbackQuery, state: FSMContext):
     if data.get("moderation_sent"):
         await callback.answer("Объявление уже отправлено на модерацию.", show_alert=True)
         return
-    await state.update_data(moderation_sent=True)
+
     user_id = callback.from_user.id
     is_trial = data.get('is_trial', True)
-    lot_id = await save_listing(user_id, data, status='PENDING_MODERATION', is_trial=is_trial)
+
+    # Сначала сохраняем в БД
+    try:
+        lot_id = await save_listing(user_id, data, status='PENDING_MODERATION', is_trial=is_trial)
+    except Exception as e:
+        import traceback
+        print(f"DEBUG: save_listing error: {e}\n{traceback.format_exc()[:500]}")
+        await callback.answer("Ошибка сохранения, попробуй ещё раз.", show_alert=True)
+        return
+
+    # Только теперь ставим флаг
+    await state.update_data(moderation_sent=True)
+
     moderation_text = (
         "Объявление отправлено на модерацию!\n\n"
         "Как только модератор примет пост - придёт уведомление вам в чат с ботом, а статус появится в разделе \"Мои объявления\""
@@ -1292,20 +1342,29 @@ async def send_moderation(callback: types.CallbackQuery, state: FSMContext):
         [InlineKeyboardButton(text="❌ Не одобрено", callback_data=f"reject_{lot_id}")]
     ])
     photos = data.get('photos', [])
+    sent_ok = False
     if photos:
-        if len(photos) == 1:
-            await bot.send_photo(chat_id=ADMIN_ID, photo=photos[0], caption=admin_text, reply_markup=admin_kb)
-        else:
-            media = []
-            for i, ph in enumerate(photos):
-                if i == 0:
-                    media.append(InputMediaPhoto(media=ph, caption=admin_text))
-                else:
-                    media.append(InputMediaPhoto(media=ph))
-            await bot.send_media_group(chat_id=ADMIN_ID, media=media)
-            await bot.send_message(chat_id=ADMIN_ID, text="Выберите действие:", reply_markup=admin_kb)
-    else:
-        await bot.send_message(chat_id=ADMIN_ID, text=admin_text, reply_markup=admin_kb)
+        try:
+            if len(photos) == 1:
+                await bot.send_photo(chat_id=ADMIN_ID, photo=photos[0], caption=admin_text, reply_markup=admin_kb)
+                sent_ok = True
+            else:
+                media = []
+                for i, ph in enumerate(photos):
+                    if i == 0:
+                        media.append(InputMediaPhoto(media=ph, caption=admin_text))
+                    else:
+                        media.append(InputMediaPhoto(media=ph))
+                await bot.send_media_group(chat_id=ADMIN_ID, media=media)
+                await bot.send_message(chat_id=ADMIN_ID, text="Выберите действие:", reply_markup=admin_kb)
+                sent_ok = True
+        except Exception as e:
+            print(f"DEBUG: send photos to admin failed: {e}")
+    if not sent_ok:
+        try:
+            await bot.send_message(chat_id=ADMIN_ID, text=admin_text, reply_markup=admin_kb)
+        except Exception as e:
+            print(f"DEBUG: send text to admin failed too: {e}")
     await state.clear()
     await callback.answer()
 
@@ -1375,10 +1434,6 @@ async def approve_ad(callback: types.CallbackQuery):
             except Exception as e:
                 print(f"Ошибка публикации: {e}")
 
-        try:
-            await db.execute("ALTER TABLE listings ADD COLUMN full_caption TEXT")
-        except sqlite3.OperationalError:
-            pass
         await db.execute(
             "UPDATE listings SET status = 'ACTIVE', channel = ?, message_id = ?, message_ids = ?, full_caption = ? WHERE id = ?",
             (first_channel, first_message_id, ",".join(saved_pairs), post_text, lot_id)
@@ -1472,18 +1527,6 @@ async def reject_ad(callback: types.CallbackQuery):
                 pass
         except Exception as e:
             print(f"Не удалось вернуть звёзды {row['user_id']}: {e}")
-            try:
-                await bot.send_message(
-                    ADMIN_ID,
-                    f"⚠️ <b>Ошибка возврата Stars</b>\n\n"
-                    f"Пользователь: <code>{row['user_id']}</code>\n"
-                    f"Объявление #{lot_id}\n"
-                    f"Charge ID: <code>{row['charge_id']}</code>\n"
-                    f"Ошибка: {e}",
-                    parse_mode="HTML"
-                )
-            except Exception:
-                pass
 
     try:
         await bot.send_message(
@@ -1523,6 +1566,8 @@ async def cancel(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("Действие отменено.", reply_markup=bottom_menu())
     await show_main_menu(message)
+
+
 @dp.callback_query(F.data == "my_ads")
 async def cb_my_ads(callback: types.CallbackQuery):
     await _send_my_ads(callback.message, callback.from_user.id)
@@ -1633,11 +1678,15 @@ async def cb_remove_ad(callback: types.CallbackQuery):
         pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
         if not pairs and ad["channel"] and ad["message_id"]:
             pairs = [f"{ad['channel']}:{ad['message_id']}"]
+        seen_ch = set()
         for pair in pairs:
             pair = pair.strip()
             if ":" not in pair:
                 continue
             ch, mid = pair.rsplit(":", 1)
+            if ch in seen_ch:
+                continue
+            seen_ch.add(ch)
             try:
                 await bot.unpin_chat_message(chat_id=ch, message_id=int(mid))
             except Exception:
@@ -1655,24 +1704,12 @@ async def cb_remove_ad(callback: types.CallbackQuery):
             verified = bool(u2[0]) if u2 else False
     except Exception:
         verified = False
-       # Берём сохранённую полную подпись и меняем только заголовок
-    full_caption = ad["full_caption"] if ad["full_caption"] else build_post_text(ad, status="АКТУАЛЬНО", author_tag=tag, author_id=ad['user_id'], verified=verified)
-    new_caption = full_caption.replace("✅АКТУАЛЬНО✅", "❌ПРОДАНО❌").replace("🔥 ТОП\n", "")
-    pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
-    if not pairs and ad["channel"] and ad["message_id"]:
-        pairs = [f"{ad['channel']}:{ad['message_id']}"]
-    for pair in pairs:
-        pair = pair.strip()
-        if ":" not in pair:
-            continue
-        ch, mid = pair.rsplit(":", 1)
-        try:
-            await bot.edit_message_caption(chat_id=ch, message_id=int(mid), caption=new_caption, parse_mode="HTML")
-        except Exception:
-            try:
-                await bot.edit_message_text(chat_id=ch, message_id=int(mid), text=new_caption, parse_mode="HTML")
-            except Exception:
-                pass
+
+    # ✅ Всегда пересобираем короткий «ПРОДАНО» через build_post_text
+    # (не полагаемся на full_caption — он может быть устаревшим)
+    new_caption = build_post_text(ad, status="ПРОДАНО", author_tag=tag, author_id=ad['user_id'], verified=verified)
+
+    await edit_post_caption_only_first(ad, new_caption)
 
     try:
         await callback.message.edit_text("Объявление снято с продажи.")
@@ -1786,7 +1823,6 @@ async def cmd_help(message: types.Message):
     ])
     await message.answer("❓ <b>Помощь</b>\n\nВыберите раздел:", reply_markup=kb, parse_mode="HTML")
 
-
 # ---------- ВЕРИФИКАЦИЯ ----------
 
 @dp.callback_query(F.data == "verify_start")
@@ -1877,10 +1913,6 @@ async def cb_dp_verify_confirm(callback: types.CallbackQuery):
         return
 
     async with aiosqlite.connect(DB_PATH) as db:
-        try:
-            await db.execute("ALTER TABLE users ADD COLUMN verified INTEGER DEFAULT 0")
-        except sqlite3.OperationalError:
-            pass
         await db.execute("UPDATE users SET verified = 1 WHERE user_id = ?", (user_id,))
         await db.commit()
 
@@ -1897,21 +1929,13 @@ async def cb_dp_verify_confirm(callback: types.CallbackQuery):
             except Exception:
                 tag = f'<a href="tg://user?id={ad["user_id"]}">Продавец</a>'
             new_caption = build_post_text(ad, status="АКТУАЛЬНО", author_tag=tag, author_id=ad['user_id'], verified=True)
-            pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
-            if not pairs and ad["channel"] and ad["message_id"]:
-                pairs = [f"{ad['channel']}:{ad['message_id']}"]
-            for pair in pairs:
-                pair = pair.strip()
-                if ":" not in pair:
-                    continue
-                ch, mid = pair.rsplit(":", 1)
-                try:
-                    await bot.edit_message_caption(chat_id=ch, message_id=int(mid), caption=new_caption, parse_mode="HTML")
-                except Exception:
-                    try:
-                        await bot.edit_message_text(chat_id=ch, message_id=int(mid), text=new_caption, parse_mode="HTML")
-                    except Exception as e:
-                        print(f"Не удалось отредактировать {ch}/{mid}: {e}")
+            # ✅ Обновляем full_caption в БД
+            await db.execute(
+                "UPDATE listings SET full_caption = ? WHERE id = ?",
+                (new_caption, ad['id'])
+            )
+            await edit_post_caption_only_first(ad, new_caption)
+        await db.commit()
     try:
         await bot.send_message(user_id, "✅ Верификация подтверждена! Теперь в вашем профиле есть галочка.")
     except Exception:
@@ -1952,15 +1976,6 @@ async def process_subscription_keyword(message: types.Message, state: FSMContext
         await message.answer("Слишком короткое слово, минимум 2 символа.")
         return
     async with aiosqlite.connect(DB_PATH) as db:
-        try:
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS subscriptions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL, keyword TEXT NOT NULL, created_at TIMESTAMP
-                )
-            """)
-        except sqlite3.OperationalError:
-            pass
         await db.execute(
             "INSERT INTO subscriptions (user_id, keyword, created_at) VALUES (?, ?, ?)",
             (message.from_user.id, keyword, datetime.now().isoformat())
@@ -1974,15 +1989,6 @@ async def process_subscription_keyword(message: types.Message, state: FSMContext
 @dp.callback_query(F.data == "sub_list")
 async def cb_sub_list(callback: types.CallbackQuery):
     async with aiosqlite.connect(DB_PATH) as db:
-        try:
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS subscriptions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL, keyword TEXT NOT NULL, created_at TIMESTAMP
-                )
-            """)
-        except sqlite3.OperationalError:
-            pass
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM subscriptions WHERE user_id = ? ORDER BY id DESC",
@@ -2280,8 +2286,6 @@ async def cmd_broadcast(message: types.Message, state: FSMContext):
 
 @dp.message(Command("send"))
 async def cmd_send(message: types.Message):
-    """Отправить личное сообщение конкретному пользователю по его ID.
-    Использование: /send <user_id> <текст>"""
     if message.from_user.id != ADMIN_ID:
         return
     parts = message.text.split(maxsplit=2)
@@ -2325,7 +2329,6 @@ async def cmd_send(message: types.Message):
 
 @dp.message(Command("users"))
 async def cmd_users(message: types.Message):
-    """Список пользователей бота. Использование: /users [поиск_по_id]"""
     if message.from_user.id != ADMIN_ID:
         return
     parts = message.text.split(maxsplit=1)
@@ -2398,7 +2401,7 @@ async def process_restore_file(message: types.Message, state: FSMContext):
         await bot.download_file(file.file_path, DB_PATH)
         print(f"DEBUG: DB restored from file, running migrations...")
 
-        # 🔧 КЛЮЧЕВОЕ: прогоняем миграции на восстановленной БД
+        # 🔧 Прогоняем миграции на восстановленной БД
         await init_db()
 
         async with aiosqlite.connect(DB_PATH) as db:
@@ -2462,21 +2465,7 @@ async def expire_loop():
                 except Exception:
                     verified = False
                 new_caption = build_post_text(ad, status="ПРОДАНО", author_tag=tag, author_id=ad['user_id'], verified=verified)
-                pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
-                if not pairs and ad["channel"] and ad["message_id"]:
-                    pairs = [f"{ad['channel']}:{ad['message_id']}"]
-                for pair in pairs:
-                    pair = pair.strip()
-                    if ":" not in pair:
-                        continue
-                    ch, mid = pair.rsplit(":", 1)
-                    try:
-                        await bot.edit_message_caption(chat_id=ch, message_id=int(mid), caption=new_caption, parse_mode="HTML")
-                    except Exception:
-                        try:
-                            await bot.edit_message_text(chat_id=ch, message_id=int(mid), text=new_caption, parse_mode="HTML")
-                        except Exception as e:
-                            print(f"Ошибка редактирования {ch}/{mid}: {e}")
+                await edit_post_caption_only_first(ad, new_caption)
                 try:
                     await bot.send_message(
                         ad["user_id"],
@@ -2505,12 +2494,6 @@ async def unpin_loop():
                 ) as cur:
                     expired = await cur.fetchall()
             for ad in expired:
-                async with aiosqlite.connect(DB_PATH) as db:
-                    await db.execute(
-                        "UPDATE listings SET is_promoted = 0, promoted_until = NULL WHERE id = ?",
-                        (ad["id"],)
-                    )
-                    await db.commit()
                 try:
                     author = await bot.get_chat(ad['user_id'])
                     tag = make_author_tag(author.username, author.first_name, ad['user_id'])
@@ -2525,25 +2508,33 @@ async def unpin_loop():
                 except Exception:
                     verified = False
                 new_caption = build_post_text(ad_dict, status="АКТУАЛЬНО", author_tag=tag, author_id=ad['user_id'], verified=verified)
+
+                # ✅ Обновляем БД: is_promoted=0, promoted_until=NULL, full_caption
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute(
+                        "UPDATE listings SET is_promoted = 0, promoted_until = NULL, full_caption = ? WHERE id = ?",
+                        (new_caption, ad["id"])
+                    )
+                    await db.commit()
+
+                # Открепляем
                 pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
                 if not pairs and ad["channel"] and ad["message_id"]:
                     pairs = [f"{ad['channel']}:{ad['message_id']}"]
+                seen_ch = set()
                 for pair in pairs:
                     pair = pair.strip()
                     if ":" not in pair:
                         continue
                     ch, mid = pair.rsplit(":", 1)
+                    if ch in seen_ch:
+                        continue
+                    seen_ch.add(ch)
                     try:
                         await bot.unpin_chat_message(chat_id=ch, message_id=int(mid))
                     except Exception:
                         pass
-                    try:
-                        await bot.edit_message_caption(chat_id=ch, message_id=int(mid), caption=new_caption, parse_mode="HTML")
-                    except Exception:
-                        try:
-                            await bot.edit_message_text(chat_id=ch, message_id=int(mid), text=new_caption, parse_mode="HTML")
-                        except Exception as e:
-                            print(f"Не удалось отредактировать {ch}/{mid}: {e}")
+                await edit_post_caption_only_first(ad_dict, new_caption)
                 try:
                     await bot.send_message(
                         ad["user_id"],
@@ -2646,20 +2637,6 @@ async def on_successful_payment(message: Message, state: FSMContext):
             await message.answer("Объявление не найдено, но оплата получена. Напишите в поддержку.")
             return
         promoted_until = (datetime.now() + timedelta(days=7)).isoformat()
-        async with aiosqlite.connect(DB_PATH) as db:
-            try:
-                await db.execute("ALTER TABLE listings ADD COLUMN is_promoted INTEGER DEFAULT 0")
-            except sqlite3.OperationalError:
-                pass
-            try:
-                await db.execute("ALTER TABLE listings ADD COLUMN promoted_until TIMESTAMP")
-            except sqlite3.OperationalError:
-                pass
-            await db.execute(
-                "UPDATE listings SET is_promoted = 1, promoted_until = ? WHERE id = ?",
-                (promoted_until, lot_id)
-            )
-            await db.commit()
         try:
             author = await bot.get_chat(ad['user_id'])
             tag = make_author_tag(author.username, author.first_name, ad['user_id'])
@@ -2674,21 +2651,27 @@ async def on_successful_payment(message: Message, state: FSMContext):
         except Exception:
             verified = False
         post_text = build_post_text(ad_dict, status="АКТУАЛЬНО", author_tag=tag, author_id=ad['user_id'], verified=verified)
-        pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
-        if not pairs and ad["channel"] and ad["message_id"]:
-            pairs = [f"{ad['channel']}:{ad['message_id']}"]
+        # ✅ Обновляем БД: is_promoted, promoted_until, full_caption
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE listings SET is_promoted = 1, promoted_until = ?, full_caption = ? WHERE id = ?",
+                (promoted_until, post_text, lot_id)
+            )
+            await db.commit()
+        await edit_post_caption_only_first(ad_dict, post_text)
+        # Закреп только первого фото каждого канала
+        pairs = (ad_dict["message_ids"] or "").split(",") if ad_dict["message_ids"] else []
+        if not pairs and ad_dict["channel"] and ad_dict["message_id"]:
+            pairs = [f"{ad_dict['channel']}:{ad_dict['message_id']}"]
+        seen_ch = set()
         for pair in pairs:
             pair = pair.strip()
             if ":" not in pair:
                 continue
             ch, mid = pair.rsplit(":", 1)
-            try:
-                await bot.edit_message_caption(chat_id=ch, message_id=int(mid), caption=post_text, parse_mode="HTML")
-            except Exception:
-                try:
-                    await bot.edit_message_text(chat_id=ch, message_id=int(mid), text=post_text, parse_mode="HTML")
-                except Exception as e:
-                    print(f"Не удалось отредактировать {ch}/{mid}: {e}")
+            if ch in seen_ch:
+                continue
+            seen_ch.add(ch)
             try:
                 await bot.pin_chat_message(chat_id=ch, message_id=int(mid), disable_notification=True)
             except Exception as e:
@@ -2712,10 +2695,6 @@ async def on_successful_payment(message: Message, state: FSMContext):
 
     if payload.startswith("verify_"):
         async with aiosqlite.connect(DB_PATH) as db:
-            try:
-                await db.execute("ALTER TABLE users ADD COLUMN verified INTEGER DEFAULT 0")
-            except sqlite3.OperationalError:
-                pass
             await db.execute("UPDATE users SET verified = 1 WHERE user_id = ?", (user_id,))
             await db.commit()
         async with aiosqlite.connect(DB_PATH) as db:
@@ -2724,28 +2703,19 @@ async def on_successful_payment(message: Message, state: FSMContext):
                 "SELECT * FROM listings WHERE user_id = ? AND status = 'ACTIVE'", (user_id,)
             ) as cur:
                 ads = await cur.fetchall()
-        for ad in ads:
-            try:
-                author = await bot.get_chat(ad['user_id'])
-                tag = make_author_tag(author.username, author.first_name, ad['user_id'])
-            except Exception:
-                tag = f'<a href="tg://user?id={ad["user_id"]}">Продавец</a>'
-            new_caption = build_post_text(ad, status="АКТУАЛЬНО", author_tag=tag, author_id=ad['user_id'], verified=True)
-            pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
-            if not pairs and ad["channel"] and ad["message_id"]:
-                pairs = [f"{ad['channel']}:{ad['message_id']}"]
-            for pair in pairs:
-                pair = pair.strip()
-                if ":" not in pair:
-                    continue
-                ch, mid = pair.rsplit(":", 1)
+            for ad in ads:
                 try:
-                    await bot.edit_message_caption(chat_id=ch, message_id=int(mid), caption=new_caption, parse_mode="HTML")
+                    author = await bot.get_chat(ad['user_id'])
+                    tag = make_author_tag(author.username, author.first_name, ad['user_id'])
                 except Exception:
-                    try:
-                        await bot.edit_message_text(chat_id=ch, message_id=int(mid), text=new_caption, parse_mode="HTML")
-                    except Exception as e:
-                        print(f"Не удалось отредактировать {ch}/{mid}: {e}")
+                    tag = f'<a href="tg://user?id={ad["user_id"]}">Продавец</a>'
+                new_caption = build_post_text(ad, status="АКТУАЛЬНО", author_tag=tag, author_id=ad['user_id'], verified=True)
+                await db.execute(
+                    "UPDATE listings SET full_caption = ? WHERE id = ?",
+                    (new_caption, ad['id'])
+                )
+                await edit_post_caption_only_first(ad, new_caption)
+            await db.commit()
         await message.answer("✅ Верификация подтверждена! В профиле появилась галочка.")
         try:
             await bot.send_message(
@@ -2777,11 +2747,6 @@ async def on_successful_payment(message: Message, state: FSMContext):
                 await message.answer("Объявление не найдено, но оплата получена. Напишите в поддержку.")
                 return
             new_expires = (datetime.now() + timedelta(days=7)).isoformat()
-            await db.execute(
-                "UPDATE listings SET status = 'ACTIVE', expires_at = ?, charge_id = ? WHERE id = ?",
-                (new_expires, charge_id, lot_id)
-            )
-            await db.commit()
         try:
             author = await bot.get_chat(user_id)
             tag = make_author_tag(author.username, author.first_name, user_id)
@@ -2795,21 +2760,13 @@ async def on_successful_payment(message: Message, state: FSMContext):
         except Exception:
             verified = False
         new_caption = build_post_text(ad, status="АКТУАЛЬНО", author_tag=tag, author_id=user_id, verified=verified)
-        pairs = (ad["message_ids"] or "").split(",") if ad["message_ids"] else []
-        if not pairs and ad["channel"] and ad["message_id"]:
-            pairs = [f"{ad['channel']}:{ad['message_id']}"]
-        for pair in pairs:
-            pair = pair.strip()
-            if ":" not in pair:
-                continue
-            ch, mid = pair.rsplit(":", 1)
-            try:
-                await bot.edit_message_caption(chat_id=ch, message_id=int(mid), caption=new_caption, parse_mode="HTML")
-            except Exception:
-                try:
-                    await bot.edit_message_text(chat_id=ch, message_id=int(mid), text=new_caption, parse_mode="HTML")
-                except Exception as e:
-                    print(f"Не удалось отредактировать {ch}/{mid}: {e}")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE listings SET status = 'ACTIVE', expires_at = ?, charge_id = ?, full_caption = ? WHERE id = ?",
+                (new_expires, charge_id, new_caption, lot_id)
+            )
+            await db.commit()
+        await edit_post_caption_only_first(ad, new_caption)
         await message.answer("✅ Оплата получена! Публикация продлена на 7 дней.")
         try:
             await bot.send_message(
@@ -2853,7 +2810,6 @@ async def on_successful_payment(message: Message, state: FSMContext):
 # ---------- МЕНЮ КОМАНД ----------
 
 async def setup_bot_commands():
-    """Стандартное меню для всех + расширенное для админа."""
     user_commands = [
         BotCommand(command="start",    description="🏡 Запустить / Главное меню"),
         BotCommand(command="menu",     description="🏠 Открыть главное меню"),
