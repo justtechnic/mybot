@@ -700,49 +700,87 @@ async def cb_pay_donatepay(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@dp.callback_query(F.data == "donatepay_done")
-async def cb_donatepay_done(callback: types.CallbackQuery, state: FSMContext):
+@dp.callback_query(F.data == "verify_donatepay_done")
+async def cb_verify_donatepay_done(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     if data.get("donatepay_pending"):
-        await callback.answer("Заявка уже отправлена, ожидайте проверки.", show_alert=True)
+        await callback.answer("Заявка уже отправлена.", show_alert=True)
         return
-    context = data.get("paid_context", "new")
-    renew_lot_id = data.get("renew_lot_id") if context == "renew" else None
-    username = callback.from_user.username
-    username_str = f"@{username}" if username else "нет username"
-    first_name = escape_html(callback.from_user.first_name or "")
     text = (
-        f"💰 <b>Заявка на подтверждение DonatePay</b>\n\n"
-        f"Пользователь: {first_name} ({username_str})\n"
-        f"Telegram ID: <code>{callback.from_user.id}</code>\n"
-        f"Контекст: {'продление объявления #' + str(renew_lot_id) if context == 'renew' else 'новое объявление'}\n\n"
-        f"Сверьте никнейм с полем «Имя» в кабинете DonatePay.\n"
-        f"Проверьте поступление 25₽ и подтвердите."
+        f"🛡 <b>Заявка на верификацию (DonatePay)</b>\n\n"
+        f"Пользователь: {escape_html(callback.from_user.first_name)} (@{callback.from_user.username or 'нет'})\n"
+        f"ID: <code>{callback.from_user.id}</code>\n\n"
+        f"Подтвердите оплату 25₽."
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Подтвердить",
-            callback_data=f"dp_confirm_{callback.from_user.id}_{context}_{renew_lot_id or 0}")],
-        [InlineKeyboardButton(text="❌ Отклонить",
-            callback_data=f"dp_reject_{callback.from_user.id}")]
+        [InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"dp_verify_confirm_{callback.from_user.id}")],
+        [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"dp_reject_{callback.from_user.id}")]
     ])
     try:
-        await bot.send_message(chat_id=ADMIN_ID, text=text, reply_markup=kb, parse_mode="HTML")
+        await bot.send_message(ADMIN_ID, text, reply_markup=kb, parse_mode="HTML")
     except Exception as e:
-        print(f"Не удалось отправить заявку админу: {e}")
-        await callback.answer("Ошибка, напишите в поддержку.", show_alert=True)
+        print(f"Ошибка: {e}")
+        await callback.answer("Ошибка.", show_alert=True)
         return
     await state.update_data(donatepay_pending=True)
-    try:
-        await callback.message.edit_text(
-            "✅ Заявка отправлена админу. Как только оплата подтвердится — придёт уведомление.",
-            reply_markup=None
-        )
-    except Exception:
-        await callback.message.answer(
-            "✅ Заявка отправлена админу. Как только оплата подтвердится — придёт уведомление."
-        )
+    await callback.message.edit_text("✅ Заявка отправлена админу.")
     await callback.answer()
 
+@dp.callback_query(F.data.startswith("dp_verify_confirm_"))
+async def cb_dp_verify_confirm(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    parts = callback.data.split("_")
+    if len(parts) < 4:
+        await callback.answer("Некорректные данные.", show_alert=True)
+        return
+    try:
+        user_id = int(parts[3])
+    except ValueError:
+        await callback.answer("Некорректные данные.", show_alert=True)
+        return
+
+    # ✅ Гарантируем строку в users + ставим verified = 1
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO users (user_id, first_seen) VALUES (?, ?)",
+            (user_id, datetime.now().isoformat())
+        )
+        await db.execute("UPDATE users SET verified = 1 WHERE user_id = ?", (user_id,))
+        await db.commit()
+        async with db.execute("SELECT verified FROM users WHERE user_id = ?", (user_id,)) as cur:
+            check = await cur.fetchone()
+        print(f"DEBUG: dp_verify_confirm user_id={user_id}, verified={check}")
+
+    # Обновляем посты в каналах — добавляем «✅ Проверенный продавец»
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM listings WHERE user_id = ? AND status = 'ACTIVE'", (user_id,)
+        ) as cur:
+            ads = await cur.fetchall()
+        for ad in ads:
+            try:
+                author = await bot.get_chat(ad['user_id'])
+                tag = make_author_tag(author.username, author.first_name, ad['user_id'])
+            except Exception:
+                tag = f'<a href="tg://user?id={ad["user_id"]}">Продавец</a>'
+            new_caption = build_post_text(ad, status="АКТУАЛЬНО", author_tag=tag, author_id=ad['user_id'], verified=True)
+            await db.execute(
+                "UPDATE listings SET full_caption = ? WHERE id = ?",
+                (new_caption, ad['id'])
+            )
+            await edit_post_caption_only_first(ad, new_caption)
+        await db.commit()
+
+    try:
+        await bot.send_message(user_id, "✅ Верификация подтверждена! Теперь в вашем профиле есть галочка.")
+    except Exception:
+        pass
+
+    await safe_append_and_edit(callback.message, "\n\n✅ Подтверждено")
+    await callback.answer("Подтверждено")
 
 @dp.callback_query(F.data.startswith("dp_confirm_"))
 async def cb_dp_confirm(callback: types.CallbackQuery, state: FSMContext):
@@ -1869,72 +1907,6 @@ async def cb_verify_donatepay(callback: types.CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-
-@dp.callback_query(F.data == "verify_donatepay_done")
-async def cb_verify_donatepay_done(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    if data.get("donatepay_pending"):
-        await callback.answer("Заявка уже отправлена.", show_alert=True)
-        return
-    text = (
-        f"🛡 <b>Заявка на верификацию (DonatePay)</b>\n\n"
-        f"Пользователь: {escape_html(callback.from_user.first_name)} (@{callback.from_user.username or 'нет'})\n"
-        f"ID: <code>{callback.from_user.id}</code>\n\n"
-        f"Подтвердите оплату 25₽."
-    )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"dp_verify_confirm_{callback.from_user.id}")],
-        [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"dp_reject_{callback.from_user.id}")]
-    ])
-    try:
-        await bot.send_message(ADMIN_ID, text, reply_markup=kb, parse_mode="HTML")
-    except Exception as e:
-        print(f"Ошибка: {e}")
-        await callback.answer("Ошибка.", show_alert=True)
-        return
-    await state.update_data(donatepay_pending=True)
-    await callback.message.edit_text("✅ Заявка отправлена админу.")
-    await callback.answer()
-
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        # Гарантируем, что строка есть (иначе UPDATE обновит 0 строк молча)
-        await db.execute(
-            "INSERT OR IGNORE INTO users (user_id, first_seen) VALUES (?, ?)",
-            (user_id, datetime.now().isoformat())
-        )
-        await db.execute("UPDATE users SET verified = 1 WHERE user_id = ?", (user_id,))
-        await db.commit()
-        async with db.execute("SELECT verified FROM users WHERE user_id = ?", (user_id,)) as cur:
-            check = await cur.fetchone()
-        print(f"DEBUG: verify user_id={user_id}, after update verified={check}")
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM listings WHERE user_id = ? AND status = 'ACTIVE'", (user_id,)
-        ) as cur:
-            ads = await cur.fetchall()
-        for ad in ads:
-            try:
-                author = await bot.get_chat(ad['user_id'])
-                tag = make_author_tag(author.username, author.first_name, ad['user_id'])
-            except Exception:
-                tag = f'<a href="tg://user?id={ad["user_id"]}">Продавец</a>'
-            new_caption = build_post_text(ad, status="АКТУАЛЬНО", author_tag=tag, author_id=ad['user_id'], verified=True)
-            # ✅ Обновляем full_caption в БД
-            await db.execute(
-                "UPDATE listings SET full_caption = ? WHERE id = ?",
-                (new_caption, ad['id'])
-            )
-            await edit_post_caption_only_first(ad, new_caption)
-        await db.commit()
-    try:
-        await bot.send_message(user_id, "✅ Верификация подтверждена! Теперь в вашем профиле есть галочка.")
-    except Exception:
-        pass
-    await safe_append_and_edit(callback.message, "\n\n✅ Подтверждено")
-    await callback.answer("Подтверждено")
 
 
 # ---------- ПОДПИСКИ ----------
