@@ -1897,24 +1897,17 @@ async def cb_verify_donatepay_done(callback: types.CallbackQuery, state: FSMCont
     await callback.answer()
 
 
-@dp.callback_query(F.data.startswith("dp_verify_confirm_"))
-async def cb_dp_verify_confirm(callback: types.CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
-        await callback.answer("Нет доступа", show_alert=True)
-        return
-    parts = callback.data.split("_")
-    if len(parts) < 4:
-        await callback.answer("Некорректные данные.", show_alert=True)
-        return
-    try:
-        user_id = int(parts[3])
-    except ValueError:
-        await callback.answer("Некорректные данные.", show_alert=True)
-        return
-
     async with aiosqlite.connect(DB_PATH) as db:
+        # Гарантируем, что строка есть (иначе UPDATE обновит 0 строк молча)
+        await db.execute(
+            "INSERT OR IGNORE INTO users (user_id, first_seen) VALUES (?, ?)",
+            (user_id, datetime.now().isoformat())
+        )
         await db.execute("UPDATE users SET verified = 1 WHERE user_id = ?", (user_id,))
         await db.commit()
+        async with db.execute("SELECT verified FROM users WHERE user_id = ?", (user_id,)) as cur:
+            check = await cur.fetchone()
+        print(f"DEBUG: verify user_id={user_id}, after update verified={check}")
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -2695,8 +2688,15 @@ async def on_successful_payment(message: Message, state: FSMContext):
 
     if payload.startswith("verify_"):
         async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT OR IGNORE INTO users (user_id, first_seen) VALUES (?, ?)",
+                (user_id, datetime.now().isoformat())
+            )
             await db.execute("UPDATE users SET verified = 1 WHERE user_id = ?", (user_id,))
             await db.commit()
+            async with db.execute("SELECT verified FROM users WHERE user_id = ?", (user_id,)) as cur:
+                check = await cur.fetchone()
+            print(f"DEBUG: verify(stars) user_id={user_id}, verified={check}")
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
