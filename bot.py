@@ -1,5 +1,5 @@
 # ============================================================
-#  JustTrade — bot.py
+#  JustTrade — bot.py  (финальная версия)
 #  ЧАСТЬ 1/4. Склейте части 1 → 2 → 3 → 4 в один файл bot.py
 # ============================================================
 import os
@@ -16,6 +16,7 @@ from aiohttp import web
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, types
 from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ChatType
 from aiogram.filters import BaseFilter, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -23,9 +24,10 @@ from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     BotCommand, BotCommandScopeChat, BotCommandScopeDefault,
+    BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats,
     FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup,
     InputMediaPhoto, KeyboardButton, LabeledPrice, Message,
-    PreCheckoutQuery, ReplyKeyboardMarkup,
+    PreCheckoutQuery, ReplyKeyboardMarkup, ReplyKeyboardRemove,
 )
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
@@ -38,6 +40,7 @@ def _env(name: str, default: str = "") -> str:
 TOKEN = _env("BOT_TOKEN")
 ADMIN_ID = int(_env("ADMIN_ID", "7614009397"))
 CHANNELS = ["@JustTechnic", "@baraholkamskkupiproday"]
+FLEA_CHAT = _env("FLEA_CHAT", "@baraholkamskkupiproday")
 DB_PATH = _env("DB_PATH", "market.db")
 SUPPORT_CONTACT = "@justtechnic1"
 WEBHOOK_SECRET = _env("WEBHOOK_SECRET")
@@ -145,7 +148,7 @@ async def is_verified(user_id: int) -> bool:
 
 
 def fsm_for_user(user_id: int) -> FSMContext:
-    """FSM-контекст ДРУГОГО пользователя (для подтверждения оплаты админом)."""
+    """FSM-контекст ДРУГОГО пользователя (подтверждение оплаты админом)."""
     return FSMContext(
         storage=dp.storage,
         key=StorageKey(bot_id=bot.id, chat_id=user_id, user_id=user_id),
@@ -219,7 +222,6 @@ def build_post_text(ad, status="АКТУАЛЬНО", author_tag=None, author_id=
         head += f"💾Память: {memory}\n\n"
     tail = f"\n\n🇷🇺{city}\n💸{price}\n🚛{delivery}\n\n🥷🏻"
 
-    # description подрезаем так, чтобы caption гарантированно влез в лимит
     overhead = tg_len(head) + tg_len(tail) + tg_len(_strip_tags(tag)) + tg_len(suffix)
     budget = max(0, max_len - overhead)
     if tg_len(description) > budget:
@@ -229,7 +231,7 @@ def build_post_text(ad, status="АКТУАЛЬНО", author_tag=None, author_id=
 
 
 def iter_first_posts(ad):
-    """Первое сообщение каждого канала (для медиагрупп — только первое фото)."""
+    """Первое сообщение каждого канала/чата (у медиагрупп — только первое фото)."""
     raw = row_get(ad, "message_ids", "") or ""
     pairs = [p.strip() for p in raw.split(",") if p.strip()]
     if not pairs:
@@ -257,10 +259,8 @@ async def edit_post_caption_only_first(ad, caption: str, parse_mode: str = "HTML
                                            caption=caption, parse_mode=parse_mode)
             continue
         except Exception as e:
-            err = str(e).lower()
-            if "message is not modified" in err:
+            if "message is not modified" in str(e).lower():
                 continue
-        # пост мог быть текстовым — пробуем edit_text
         try:
             await bot.edit_message_text(chat_id=ch, message_id=mid,
                                         text=caption, parse_mode=parse_mode)
@@ -506,6 +506,33 @@ def subscriptions_menu_kb():
     ])
 
 
+def help_menu_kb(with_back: bool = True):
+    kb = [
+        [InlineKeyboardButton(text="📄 Правила публикации", callback_data="help_rules")],
+        [InlineKeyboardButton(text="❔ Как выставить?", callback_data="help_howto")],
+        [InlineKeyboardButton(text="⚠️ Отказ в публикации", callback_data="help_reject")],
+        [InlineKeyboardButton(text="📚 Мои лоты", callback_data="my_ads")],
+    ]
+    if with_back:
+        kb.append([InlineKeyboardButton(text="↩️ Назад", callback_data="main_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+PROMOTE_TEXT = (
+    "🚀 <b>Поднятие объявления в топ</b>\n\n"
+    "Объявление будет закреплено в канале на 7 дней с пометкой 🔥 ТОП.\n\n"
+    "Выберите способ оплаты:"
+)
+
+
+def promote_pay_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="25⭐️", callback_data="promote_pay_stars")],
+        [InlineKeyboardButton(text="25💸", callback_data="promote_pay_donatepay")],
+        [InlineKeyboardButton(text="↩️ Назад", callback_data="my_ads")],
+    ])
+
+
 PHOTOS_PROMPT = (
     "📸Фотографии\n\n"
     "Покажите фото товара, которое сейчас опубликуете.\n\n"
@@ -532,6 +559,23 @@ FORM_INTRO = (
 
 
 # ---------------------- МИДЛВАРИ ----------------------
+class PrivateOnlyMiddleware(BaseMiddleware):
+    """🔒 Бот отвечает ТОЛЬКО в личных сообщениях.
+    В группах и каналах — полное молчание. Публикация/редактирование/закреп
+    идут исходящими запросами bot.send_* и через dispatcher не проходят."""
+
+    async def __call__(self, handler: Callable[[Any, Dict[str, Any]], Awaitable[Any]],
+                       event: Any, data: Dict[str, Any]) -> Any:
+        chat = None
+        if isinstance(event, types.Message):
+            chat = event.chat
+        elif isinstance(event, types.CallbackQuery):
+            chat = getattr(event.message, "chat", None)
+        if chat is not None and chat.type != ChatType.PRIVATE:
+            return None
+        return await handler(event, data)
+
+
 class AntiSpamMiddleware(BaseMiddleware):
     def __init__(self, cooldown: float = 2.0):
         self.cooldown = cooldown
@@ -865,7 +909,7 @@ async def cb_pay_stars(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# ---------- ОПЛАТА: DONATEPAY (новое / продление) ----------
+# ---------- ОПЛАТА: DONATEPAY ----------
 @dp.callback_query(F.data == "pay_donatepay")
 async def cb_pay_donatepay(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(donatepay_initiated=True, donatepay_pending=False)
@@ -889,7 +933,6 @@ async def cb_pay_donatepay(callback: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "donatepay_done")
 async def cb_donatepay_done(callback: types.CallbackQuery, state: FSMContext):
-    """Раньше этого хендлера не было — кнопка «Готово» не работала."""
     data = await state.get_data()
     if data.get("donatepay_pending"):
         await callback.answer("Заявка уже отправлена, ожидайте проверки.", show_alert=True)
@@ -947,21 +990,6 @@ async def cb_promote(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(promote_lot_id=lot_id, paid_context="promote", donatepay_pending=False)
     await safe_edit_or_caption(callback.message, PROMOTE_TEXT, promote_pay_kb())
     await callback.answer()
-
-
-PROMOTE_TEXT = (
-    "🚀 <b>Поднятие объявления в топ</b>\n\n"
-    "Объявление будет закреплено в канале на 7 дней с пометкой 🔥 ТОП.\n\n"
-    "Выберите способ оплаты:"
-)
-
-
-def promote_pay_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="25⭐️", callback_data="promote_pay_stars")],
-        [InlineKeyboardButton(text="25💸", callback_data="promote_pay_donatepay")],
-        [InlineKeyboardButton(text="↩️ Назад", callback_data="my_ads")],
-    ])
 
 
 @dp.callback_query(F.data == "promote_pay_stars")
@@ -1192,7 +1220,6 @@ async def cb_dp_confirm(callback: types.CallbackQuery):
         except Exception:
             pass
     else:
-        # важно: платный пользователь не должен получить 24-часовой триал
         user_state = fsm_for_user(user_id)
         await user_state.update_data(is_trial=False, paid=True, moderation_sent=False,
                                      donatepay_pending=False)
@@ -1271,8 +1298,8 @@ async def pre_checkout(query: PreCheckoutQuery):
     await query.answer(ok=True)
 
 # ============================================================
-#  ЧАСТЬ 3/4. Все текстовые шаги защищены фильтром TextAnswer()
-#  и проверкой get_clean_text() — ошибки len(None) больше нет.
+#  ЧАСТЬ 3/4. Все текстовые шаги защищены TextAnswer()
+#  и get_clean_text() — ошибки len(None) больше нет.
 # ============================================================
 
 @dp.callback_query(F.data.startswith("adtype_"))
@@ -1950,8 +1977,8 @@ async def cb_remove_ad(callback: types.CallbackQuery):
     await callback.answer()
 
 # ============================================================
-#  ЧАСТЬ 4/4. ВАЖНО: fallback-хендлеры (~F.text и др.) идут
-#  ПОСЛЕДНИМИ, иначе они перехватят все сообщения.
+#  ЧАСТЬ 4/4. FALLBACK-хендлеры идут ПОСЛЕДНИМИ
+#  и работают ТОЛЬКО в личных сообщениях.
 # ============================================================
 
 # ---------- ПОДПИСКИ ----------
@@ -2056,18 +2083,6 @@ async def cb_sub_del(callback: types.CallbackQuery):
 
 
 # ---------- ПОМОЩЬ ----------
-def help_menu_kb(with_back: bool = True):
-    kb = [
-        [InlineKeyboardButton(text="📄 Правила публикации", callback_data="help_rules")],
-        [InlineKeyboardButton(text="❔ Как выставить?", callback_data="help_howto")],
-        [InlineKeyboardButton(text="⚠️ Отказ в публикации", callback_data="help_reject")],
-        [InlineKeyboardButton(text="📚 Мои лоты", callback_data="my_ads")],
-    ]
-    if with_back:
-        kb.append([InlineKeyboardButton(text="↩️ Назад", callback_data="main_menu")])
-    return InlineKeyboardMarkup(inline_keyboard=kb)
-
-
 @dp.callback_query(F.data == "help")
 async def cb_help(callback: types.CallbackQuery):
     await safe_edit_or_caption(
@@ -2397,12 +2412,63 @@ async def process_restore_file(message: types.Message, state: FSMContext):
         await state.clear()
 
 
+# ---------- УБОРКА В ЧАТЕ (барахолка остаётся чатом) ----------
+@dp.message(Command("chat_clean"))
+async def cmd_chat_clean(message: types.Message):
+    """Снимает ReplyKeyboard бота со всех участников чата."""
+    if message.from_user.id != ADMIN_ID:
+        return
+    try:
+        m = await bot.send_message(FLEA_CHAT, "⚙️", reply_markup=ReplyKeyboardRemove())
+        await asyncio.sleep(2)
+        try:
+            await bot.delete_message(FLEA_CHAT, m.message_id)
+        except Exception:
+            pass
+        await message.answer(
+            "✅ Клавиатура бота убрана из чата.\n"
+            "Если кнопки у кого-то остались — им нужно закрыть и открыть чат."
+        )
+    except Exception as e:
+        await message.answer(f"❌ Не получилось: <code>{escape_html(str(e))}</code>", parse_mode="HTML")
+
+
+@dp.message(Command("chat_unpin"))
+async def cmd_chat_unpin(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        await message.answer("Использование: <code>/chat_unpin message_id</code>", parse_mode="HTML")
+        return
+    try:
+        await bot.unpin_chat_message(chat_id=FLEA_CHAT, message_id=int(parts[1]))
+        await message.answer("✅ Откреплено.")
+    except Exception as e:
+        await message.answer(f"❌ <code>{escape_html(str(e))}</code>", parse_mode="HTML")
+
+
+@dp.message(Command("chat_del"))
+async def cmd_chat_del(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        await message.answer("Использование: <code>/chat_del message_id</code>", parse_mode="HTML")
+        return
+    try:
+        await bot.delete_message(chat_id=FLEA_CHAT, message_id=int(parts[1]))
+        await message.answer("✅ Сообщение удалено.")
+    except Exception as e:
+        await message.answer(f"❌ <code>{escape_html(str(e))}</code>", parse_mode="HTML")
+
+
 @dp.message(Command("reload_menu"))
 async def cmd_reload_menu(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return
     await setup_bot_commands()
-    await message.answer("✅ Меню команд обновлено.")
+    await message.answer("✅ Меню команд обновлено (в чате команд больше нет).")
 
 
 # ---------- ПРОДЛЕНИЕ ----------
@@ -2450,7 +2516,6 @@ async def on_successful_payment(message: Message, state: FSMContext):
     charge_id = payment.telegram_payment_charge_id
     user_id = message.from_user.id
 
-    # --- ТОП ---
     if payload.startswith("promote_"):
         lot_id = _safe_lot_id(payload)
         if not lot_id:
@@ -2487,7 +2552,6 @@ async def on_successful_payment(message: Message, state: FSMContext):
             pass
         return
 
-    # --- ВЕРИФИКАЦИЯ ---
     if payload.startswith("verify_"):
         await mark_verified(user_id)
         await message.answer("✅ Верификация подтверждена! В профиле появилась галочка.")
@@ -2503,7 +2567,6 @@ async def on_successful_payment(message: Message, state: FSMContext):
             pass
         return
 
-    # --- ПРОДЛЕНИЕ ---
     if payload.startswith("renew_"):
         lot_id = _safe_lot_id(payload)
         if not lot_id:
@@ -2539,7 +2602,6 @@ async def on_successful_payment(message: Message, state: FSMContext):
         await state.update_data(paid_context=None, renew_lot_id=None)
         return
 
-    # --- НОВОЕ ПЛАТНОЕ ОБЪЯВЛЕНИЕ ---
     await state.update_data(is_trial=False, paid=True, charge_id=charge_id, moderation_sent=False)
     await message.answer("✅ Оплата получена!\n\n" + FORM_INTRO, reply_markup=ad_type_kb())
     try:
@@ -2646,7 +2708,7 @@ async def backup_loop():
             print(f"Ошибка бэкапа: {e}")
 
 
-# ---------- МЕНЮ КОМАНД ----------
+# ---------- МЕНЮ КОМАНД (только личка!) ----------
 async def setup_bot_commands():
     user_commands = [
         BotCommand(command="start", description="🏡 Запустить / Главное меню"),
@@ -2657,10 +2719,6 @@ async def setup_bot_commands():
         BotCommand(command="help", description="❓ Помощь"),
         BotCommand(command="cancel", description="❌ Отменить действие"),
     ]
-    try:
-        await bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
-    except Exception as e:
-        print(f"DEBUG: default commands error: {e}")
     admin_commands = user_commands + [
         BotCommand(command="stats", description="📊 Статистика бота"),
         BotCommand(command="check_ads", description="📋 Последние 30 объявлений"),
@@ -2670,20 +2728,29 @@ async def setup_bot_commands():
         BotCommand(command="users", description="👥 Список пользователей"),
         BotCommand(command="backup", description="💾 Скачать бэкап базы"),
         BotCommand(command="restore", description="📥 Восстановить базу из файла"),
+        BotCommand(command="chat_clean", description="🧹 Убрать клавиатуру бота из чата"),
+        BotCommand(command="chat_unpin", description="📌 Открепить сообщение в чате"),
+        BotCommand(command="chat_del", description="🗑 Удалить сообщение бота в чате"),
         BotCommand(command="reload_menu", description="🔄 Обновить меню команд"),
     ]
-    try:
-        await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=ADMIN_ID))
-    except Exception as e:
-        print(f"DEBUG: admin commands error: {e}")
+    for scope, cmds in (
+        (BotCommandScopeDefault(), []),
+        (BotCommandScopeAllGroupChats(), []),
+        (BotCommandScopeAllPrivateChats(), user_commands),
+        (BotCommandScopeChat(chat_id=ADMIN_ID), admin_commands),
+    ):
+        try:
+            await bot.set_my_commands(cmds, scope=scope)
+        except Exception as e:
+            print(f"DEBUG: set_my_commands {type(scope).__name__} error: {e}")
 
 
 # ============================================================
-#  FALLBACK — строго ПОСЛЕ всех остальных message-хендлеров!
+#  FALLBACK — строго ПОСЛЕ всех остальных message-хендлеров
+#  и ТОЛЬКО для личных чатов.
 # ============================================================
-@dp.message(~F.text)
+@dp.message(~F.text, F.chat.type == ChatType.PRIVATE)
 async def handle_non_text(message: types.Message, state: FSMContext):
-    """Фото/стикеры/голосовые вне нужного шага — раньше падали в len(None)."""
     if (message.successful_payment or message.pinned_message
             or message.new_chat_members or message.left_chat_member):
         return
@@ -2705,12 +2772,12 @@ async def handle_non_text(message: types.Message, state: FSMContext):
     )
 
 
-@dp.message(F.text.startswith("/"))
+@dp.message(F.text.startswith("/"), F.chat.type == ChatType.PRIVATE)
 async def unknown_command(message: types.Message):
     await message.answer("🤷 Неизвестная команда. Откройте меню: /menu", reply_markup=bottom_menu())
 
 
-@dp.message(F.text)
+@dp.message(F.text, F.chat.type == ChatType.PRIVATE)
 async def fallback_text(message: types.Message):
     await message.answer(
         "Я не понял сообщение 🙂\nОткройте главное меню: /menu",
@@ -2730,6 +2797,7 @@ async def on_startup(bot: Bot):
     else:
         print("RENDER_EXTERNAL_URL не задан — вебхук не установлен")
     print(f"DonatePay страница: {DONATEPAY_PAGE_URL}")
+    print("🔒 Режим: бот отвечает только в личных сообщениях")
 
 
 async def health_check(request):
@@ -2744,9 +2812,13 @@ async def main():
     SimpleRequestHandler(dispatcher=dp, bot=bot,
                          secret_token=WEBHOOK_SECRET or None).register(app, path="/webhook")
 
+    # Порядок важен: outer-мидлвари срабатывают ДО фильтров
+    dp.message.outer_middleware(AdminErrorMiddleware())
+    dp.callback_query.outer_middleware(AdminErrorMiddleware())
+    dp.message.outer_middleware(PrivateOnlyMiddleware())
+    dp.callback_query.outer_middleware(PrivateOnlyMiddleware())
     dp.callback_query.middleware(AntiSpamMiddleware(cooldown=2.0))
-    dp.message.middleware(AdminErrorMiddleware())
-    dp.callback_query.middleware(AdminErrorMiddleware())
+
     dp.startup.register(on_startup)
     setup_application(app, dp, bot=bot)
 
