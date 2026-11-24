@@ -25,6 +25,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     BotCommand, BotCommandScopeChat, BotCommandScopeDefault,
     BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats,
+    BotCommandScopeAllChatAdministrators,
     FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup,
     InputMediaPhoto, KeyboardButton, LabeledPrice, Message,
     PreCheckoutQuery, ReplyKeyboardMarkup, ReplyKeyboardRemove,
@@ -1978,7 +1979,7 @@ async def cb_remove_ad(callback: types.CallbackQuery):
 
 # ============================================================
 #  ЧАСТЬ 4/4. FALLBACK-хендлеры идут ПОСЛЕДНИМИ
-#  и работают ТОЛЬКО в личных сообщениях.
+#  и работают ТОЛЬКО в личных чатах.
 # ============================================================
 
 # ---------- ПОДПИСКИ ----------
@@ -2419,7 +2420,7 @@ async def cmd_chat_clean(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return
     try:
-        m = await bot.send_message(FLEA_CHAT, "⚙️", reply_markup=ReplyKeyboardRemove())
+        m = await bot.send_message(FLEA_CHAT, "⚙️", reply_markup=ReplyKeyboardRemove(selective=False))
         await asyncio.sleep(2)
         try:
             await bot.delete_message(FLEA_CHAT, m.message_id)
@@ -2431,6 +2432,56 @@ async def cmd_chat_clean(message: types.Message):
         )
     except Exception as e:
         await message.answer(f"❌ Не получилось: <code>{escape_html(str(e))}</code>", parse_mode="HTML")
+
+
+@dp.message(Command("chat_reset"))
+async def cmd_chat_reset(message: types.Message):
+    """Полный сброс меню бота в чате: reply-клавиатура + список команд.
+    /chat_reset keep — оставить служебное сообщение (надёжнее держит клавиатуру убранной)."""
+    if message.from_user.id != ADMIN_ID:
+        return
+    try:
+        chat = await bot.get_chat(FLEA_CHAT)
+    except Exception as e:
+        await message.answer(
+            f"❌ Не могу получить чат {FLEA_CHAT}: {e}\n\n"
+            "Проверьте, что бот добавлен в чат и является админом."
+        )
+        return
+
+    report = [f"Чат: {chat.title}\nid: {chat.id}\nтип: {chat.type}\n"]
+    keep = "keep" in (message.text or "").lower()
+    try:
+        m = await bot.send_message(chat.id, "⌨️", reply_markup=ReplyKeyboardRemove(selective=False))
+        if not keep:
+            await asyncio.sleep(5)
+            try:
+                await bot.delete_message(chat.id, m.message_id)
+                report.append("✅ Reply-клавиатура снята (служебное сообщение удалено)")
+            except Exception:
+                report.append(f"✅ Reply-клавиатура снята, сообщение id={m.message_id} удалить не удалось")
+        else:
+            report.append(f"✅ Reply-клавиатура снята, сообщение id={m.message_id} оставлено в чате")
+    except Exception as e:
+        report.append(f"❌ Reply-клавиатура: {e}")
+
+    for scope in (
+        BotCommandScopeChat(chat_id=chat.id),
+        BotCommandScopeAllGroupChats(),
+        BotCommandScopeAllChatAdministrators(),
+        BotCommandScopeDefault(),
+    ):
+        try:
+            await bot.set_my_commands([], scope=scope)
+            report.append(f"✅ Команды очищены: {type(scope).__name__}")
+        except Exception as e:
+            report.append(f"❌ {type(scope).__name__}: {e}")
+
+    report.append(
+        "\n⚠️ У части участников меню может остаться в кэше — "
+        "им нужно закрыть и заново открыть чат (или перезапустить Telegram)."
+    )
+    await message.answer("\n".join(report))
 
 
 @dp.message(Command("chat_unpin"))
@@ -2468,7 +2519,7 @@ async def cmd_reload_menu(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return
     await setup_bot_commands()
-    await message.answer("✅ Меню команд обновлено (в чате команд больше нет).")
+    await message.answer("✅ Меню команд обновлено: список по / виден только вам в личке.")
 
 
 # ---------- ПРОДЛЕНИЕ ----------
@@ -2708,7 +2759,7 @@ async def backup_loop():
             print(f"Ошибка бэкапа: {e}")
 
 
-# ---------- МЕНЮ КОМАНД (только личка!) ----------
+# ---------- МЕНЮ КОМАНД: список по / виден ТОЛЬКО владельцу ----------
 async def setup_bot_commands():
     user_commands = [
         BotCommand(command="start", description="🏡 Запустить / Главное меню"),
@@ -2729,6 +2780,7 @@ async def setup_bot_commands():
         BotCommand(command="backup", description="💾 Скачать бэкап базы"),
         BotCommand(command="restore", description="📥 Восстановить базу из файла"),
         BotCommand(command="chat_clean", description="🧹 Убрать клавиатуру бота из чата"),
+        BotCommand(command="chat_reset", description="♻️ Полный сброс меню бота в чате"),
         BotCommand(command="chat_unpin", description="📌 Открепить сообщение в чате"),
         BotCommand(command="chat_del", description="🗑 Удалить сообщение бота в чате"),
         BotCommand(command="reload_menu", description="🔄 Обновить меню команд"),
@@ -2736,7 +2788,8 @@ async def setup_bot_commands():
     for scope, cmds in (
         (BotCommandScopeDefault(), []),
         (BotCommandScopeAllGroupChats(), []),
-        (BotCommandScopeAllPrivateChats(), user_commands),
+        (BotCommandScopeAllChatAdministrators(), []),
+        (BotCommandScopeAllPrivateChats(), []),
         (BotCommandScopeChat(chat_id=ADMIN_ID), admin_commands),
     ):
         try:
@@ -2797,7 +2850,7 @@ async def on_startup(bot: Bot):
     else:
         print("RENDER_EXTERNAL_URL не задан — вебхук не установлен")
     print(f"DonatePay страница: {DONATEPAY_PAGE_URL}")
-    print("🔒 Режим: бот отвечает только в личных сообщениях")
+    print("🔒 Режим: диалоги только в личке; список команд по / — только у владельца")
 
 
 async def health_check(request):
